@@ -1,8 +1,10 @@
 """Ramie SO-101 - WSZYSTKO W JEDNYM PLIKU.
 
-  python ramie.py            sterowanie z terminala + OGLADANIE PUSZKI pod ENTER (bez kamery)
-  python ramie.py --kamera   to samo w oknie z podgladem kamery i czytaniem kodow
-  python ramie.py --mock     bez ramienia (test klawiszy)
+  python ramie.py                 (albo przycisk Run w VS Code) okno kamery + SLEDZENIE butelki kaucyjnej:
+                             ramie trzyma jej kod na srodku obrazu, puszcza gdy sie oddali
+                             albo zgubi, przelacza na inna kaucyjna, jesli jest blizej (T wl/wyl)
+  python ramie.py --bez-kamery    sterowanie z terminala + ogladanie puszki pod ENTER, bez kamery
+  python ramie.py --mock          bez ramienia (sama kamera, ramie stoi)
   (port adaptera znajduje sie sam; mozna podac np. COM5)
 
 Klawisze (kliknij w terminal; z --kamera w okno kamery):
@@ -281,7 +283,7 @@ CLAMP_SPEED = 30.0               # st./s przy zamykaniu na przedmiocie
 CLAMP_LOAD = 20.0                # % obciazenia = "dotknal przedmiotu"
 CLAMP_SQUEEZE = 4.0              # st. dodatkowego docisku po dotknieciu
 RELEASE_OPEN = 35.0              # o ile st. otwiera sie chwytak przy puszczeniu
-BOOST_P = True                   # P=32 na lift/elbow do wylaczenia zasilania (z 16 opadaja)
+BOOST_P = False                  # P=32 na lift/elbow do wylaczenia zasilania (z 16 opadaja)
 
 KAMERA = None                    # None = sama wybierze (zewnetrzna, a jak nie ma - laptopa)
 POZY_SKANU = ["skan1", "skan2", "skan3", "skan4"]
@@ -294,7 +296,34 @@ PREDKOSC_SKANU = 25              # st./s
 PORT_HTTP = 8765                 # sygnal od RoArma: http://<IP>:8765/skanuj
 POZA_DOMOWA = "spoczynek"
 PLIK_POZ = "poses_so101.json"
-PLIK_KAUCJI = "kaucja.json"
+PLIK_KAUCJI = "kaucja.json"      # wlasna lista EAN z kaucja (oprocz api.kaucja.pl)
+
+# --- sledzenie butelki kaucyjnej (tryb --kamera, klawisz T wlacza/wylacza) ---
+SLEDZ = True                     # startuje wlaczone
+# Sledzenie "popraw i poczekaj": jeden spokojny ruch w strone kodu, pauza, nowa klatka, kolejny ruch.
+SLEDZ_KROK = 0.5                 # jaka czesc odleglosci do srodka pokonuje jednym ruchem (0.3 spokojnie, 0.8 szybko)
+SLEDZ_CZULOSC_POZIOM = 0.12      # start: o ile przesuwa sie kod na 1 st. podstawy (potem program sam sie uczy)
+SLEDZ_CZULOSC_PION = 0.10        # start: to samo dla nadgarstka
+SLEDZ_CEL = 0.07                 # tak blisko srodka = wycentrowany, ramie staje
+SLEDZ_START = 0.16               # wycentrowany rusza sie dopiero, gdy kod ucieknie dalej niz to (bez drgan)
+SLEDZ_MIN_KROK = 0.5             # mniejszych ruchow nie robi (st.)
+SLEDZ_MAX_KROK = 8.0             # najwiekszy pojedynczy ruch (st.)
+SLEDZ_PAUZA = 0.5                # s po ruchu, zanim spojrzy znowu (kamera ma opoznienie)
+SLEDZ_PROBKI = 3                 # z ilu klatek mediana pozycji kodu
+SLEDZ_SZUKAJ_CZAS = 1.5          # s: po utracie kodu jedzie dalej w strone, w ktora kod uciekal
+SLEDZ_SZUKAJ_MAX = 15.0          # st.: najdalej tyle "na slepo" po utracie kodu
+SERWO_ACC = 20                   # przyspieszenie serw (mniej = lagodniej; bylo 50)
+SLEDZ_LOG = "sledzenie.log"      # zapis przebiegu (do diagnozy); "" = bez zapisu
+SLEDZ_ZNAK_POZIOM = -1           # odwroc na -1, jesli ramie UCIEKA od kodu w poziomie
+SLEDZ_ZNAK_PION = -1             # odwroc na -1, jesli ucieka w pionie
+SLEDZ_STAW_POZIOM = "pan"        # ktorym stawem celowac w poziomie
+SLEDZ_STAW_PION = "wflex"        # ktorym stawem celowac w pionie
+MIN_SZEROKOSC = 0.08             # kod wezszy niz 8% obrazu = za daleko -> puszcza cel
+PRZELACZ_GDY = 1.3               # inna butelka kaucyjna 1.3x wiekszy kod (blizej) -> przelacz
+ZGUBIONY_PO = 2.0                # s bez kodu -> cel zgubiony
+SLEDZ_PROMIEN = 0.25             # nieodczytany (rozmazany) kod blizej niz 25% obrazu od ostatniej pozycji = ten sam
+KAMERA_EKSPOZYCJA = None         # None = auto (najjasniej). Stala: -4 jasno ale rozmywa, -5/-6 mniej rozmycia, trzeba lampki
+PO_UTRACIE = "stoj"              # "stoj" albo "dom" (wroc do pozy domowej)
 
 # Odwroc 1 / -1, jesli klawisz rusza w zla strone.
 DIRECTION = {"pan": 1, "lift": -1, "elbow": -1, "wflex": 1, "wroll": 1}
@@ -311,7 +340,7 @@ MOVE_JOINTS = ["pan", "lift", "elbow", "wflex", "wroll"]
 
 POMOC = (
     "WASD/IJKL/UO ruch | SPACJA chwyc/pusc | Z/X chwytak | 1 2 3 predkosc | F stop\n"
-    "ENTER ogladaj puszke | P zapisz poze skanu | R usun pozy skanu | M zapisz dom | H do domu | Q koniec"
+    "ENTER ogladaj puszke | T sledzenie (kamera) | P zapisz poze skanu | R usun pozy skanu | M zapisz dom | H do domu | Q koniec"
 )
 
 _katalog = os.path.dirname(os.path.abspath(__file__))
@@ -407,6 +436,7 @@ class Sterownik:
                 if arm.ph.read1ByteTxRx(arm.port, sid, 55)[0] != 1:
                     arm.ph.write1ByteTxRx(arm.port, sid, 55, 1)  # EEPROM zablokowany -> do wyl. zasilania
                 arm.ph.write1ByteTxRx(arm.port, sid, 21, 32)
+        arm.acc = SERWO_ACC  # lagodne rozpedzanie i hamowanie = bez szarpniec
         arm.torque(True)
         self.pad = Gamepad()
         self.pad_ok = self.pad.read() is not None
@@ -516,7 +546,7 @@ class Sterownik:
 
         spd = int(max(v, CLAMP_SPEED) * 2 * TICKS_PER_DEG)
         for j in self.arm.JOINTS:
-            if abs(self.target[j] - self.sent.get(j, 1e9)) > 0.05:
+            if abs(self.target[j] - self.sent.get(j, 1e9)) > 0.2:  # mikropoprawki = drzenie
                 self.arm._write_goal(self.arm.ids[j], _to_ticks(self.target[j]), spd)
                 self.sent[j] = self.target[j]
         return pressed
@@ -657,6 +687,15 @@ def otworz_kamere():
 
     for i in ([KAMERA] if KAMERA is not None else [1, 2, 3, 0]):
         kam = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+        # MJPG + 1280x720: ostrzejsze kody niz domyslne 640x480, a wciaz plynnie
+        kam.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        kam.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        kam.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        # Windows zapamietuje ekspozycje w sterowniku, wiec ustawiamy ja zawsze jawnie
+        if KAMERA_EKSPOZYCJA is None:
+            kam.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
+        else:
+            kam.set(cv2.CAP_PROP_EXPOSURE, KAMERA_EKSPOZYCJA)
         if kam.isOpened() and kam.read()[0]:
             print(f"Kamera {i} ({'laptop' if i == 0 else 'zewnetrzna'})")
             return kam
@@ -745,6 +784,260 @@ def serwer_http(arm):
     return srv
 
 
+def _ean_ok(ean):
+    """Suma kontrolna EAN-8/EAN-13 - odrzuca bledne odczyty."""
+    if not ean.isdigit() or len(ean) not in (8, 13):
+        return False
+    d = [int(c) for c in ean]
+    wagi = [3, 1] * (len(d) // 2) if len(d) == 8 else [1, 3] * 6
+    return (10 - sum(w * x for w, x in zip(wagi, d[:-1])) % 10) % 10 == d[-1]
+
+
+def znajdz_kody(klatka):
+    """Wszystkie kody EAN w klatce: [{"ean", "cx", "cy", "rozmiar", "rogi"}] (rozmiar = czesc szerokosci obrazu)."""
+    import cv2
+    import numpy as np
+
+    szer = klatka.shape[1]
+    gray = cv2.cvtColor(klatka, cv2.COLOR_BGR2GRAY)
+    wyniki = []
+    try:
+        import zxingcpp
+
+        surowe = zxingcpp.read_barcodes(gray)
+        if not surowe:  # puszki z odblaskami: wieksz kontrast
+            surowe = zxingcpp.read_barcodes(cv2.createCLAHE(2.0, (8, 8)).apply(gray))
+        for r in surowe:
+            p = r.position
+            rogi = np.array([[p.top_left.x, p.top_left.y], [p.top_right.x, p.top_right.y],
+                             [p.bottom_right.x, p.bottom_right.y], [p.bottom_left.x, p.bottom_left.y]])
+            wyniki.append((r.text, rogi))
+    except ImportError:  # zapas: czytnik wbudowany w OpenCV
+        ok, teksty, _t, pkt = cv2.barcode.BarcodeDetector().detectAndDecodeWithType(klatka)
+        if ok and pkt is not None:
+            wyniki = [(t, r) for t, r in zip(teksty, pkt) if t]
+    kody = []
+
+    def dodaj(ean, rogi):
+        xs, ys = rogi[:, 0], rogi[:, 1]
+        kody.append({"ean": ean, "cx": float(xs.mean()), "cy": float(ys.mean()),
+                     "rozmiar": float(max(xs.max() - xs.min(), ys.max() - ys.min())) / szer,
+                     "rogi": rogi.astype(int).reshape(-1, 1, 2)})
+
+    for ean, rogi in wyniki:
+        if _ean_ok(ean):
+            dodaj(ean, rogi)
+    # Rozmazany kod: cyfr nie da sie odczytac, ale prostokat kodu widac -> ean=None (do sledzenia)
+    global _detektor
+    if _detektor is None:
+        _detektor = cv2.barcode.BarcodeDetector()
+    ok, pkt = _detektor.detect(klatka)
+    if ok and pkt is not None:
+        for rogi in pkt:
+            cx, cy = rogi[:, 0].mean(), rogi[:, 1].mean()
+            if all(abs(cx - k["cx"]) + abs(cy - k["cy"]) > 0.05 * szer for k in kody):
+                dodaj(None, rogi)
+    return kody
+
+
+_detektor = None
+
+
+def ostrosc(klatka, calosc=False):
+    """Ostrosc srodka obrazu (albo calego wycinka) - wariancja Laplasjanu. Kod czytelny zwykle od ~100."""
+    import cv2
+
+    h, w = klatka.shape[:2]
+    kawalek = klatka if calosc else klatka[h // 4:3 * h // 4, w // 4:3 * w // 4]
+    srodek = cv2.cvtColor(kawalek, cv2.COLOR_BGR2GRAY)
+    return cv2.Laplacian(srodek, cv2.CV_64F).var()
+
+
+class Kaucje:
+    """Czy EAN jest kaucyjny: kaucja.json albo api.kaucja.pl (w tle, z pamiecia)."""
+
+    def __init__(self):
+        self.status = {}  # ean -> True / False / None (sprawdzam)
+        self.nazwy = {}
+
+    def sprawdz(self, ean):
+        if ean in self.status:
+            return self.status[ean]
+        if ean in wczytaj(PLIK_KAUCJI, []):
+            self.status[ean] = True
+            return True
+        self.status[ean] = None
+        threading.Thread(target=self._api, args=(ean,), daemon=True).start()
+        return None
+
+    def _api(self, ean):
+        try:
+            import requests
+
+            r = requests.get(f"https://api.kaucja.pl/buf/pos/product/{ean}", timeout=5)
+            dane = r.json() if r.status_code == 200 else {}
+            self.status[ean] = dane.get("deposit") is not None
+            self.nazwy[ean] = dane.get("publishedName") or dane.get("name") or ""
+        except Exception:
+            self.status[ean] = False  # brak sieci / blad -> traktuj jak nie-kaucyjny
+        print(f"\n{ean}: {'KAUCJA' if self.status[ean] else 'bez kaucji'} {self.nazwy.get(ean, '')}")
+
+
+def _log(tekst):
+    if SLEDZ_LOG:
+        with open(os.path.join(_katalog, SLEDZ_LOG), "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%H:%M:%S')} {tekst}\n")
+
+
+class Sledzenie:
+    """Trzyma kod kaucyjny na srodku obrazu. Puszcza, gdy za daleko albo zgubiony;
+    przelacza sie na inna butelke kaucyjna, jesli jest wyraznie blizej."""
+
+    def __init__(self):
+        self.cel = None          # ean sledzonej butelki
+        self.rozmiar = 0.0
+        self.widziany = 0.0
+        self.xy = None           # ostatnia pozycja kodu (px)
+        self._reset()
+
+    def krok(self, kody, kaucje, szer, wys, st, dt):
+        """Aktualizuje cel i przesuwa st.target. Zwraca komunikat albo None."""
+        teraz = time.time()
+        kaucyjne = [k for k in kody if k["ean"] and kaucje.sprawdz(k["ean"]) and k["rozmiar"] >= MIN_SZEROKOSC]
+        najblizszy = max(kaucyjne, key=lambda k: k["rozmiar"], default=None)
+        msg = None
+        biezacy = next((k for k in kody if self.cel and k["ean"] == self.cel), None)
+        if biezacy is None and self.cel and self.xy:
+            # cyfr nie widac (rozmycie) - bierz najblizszy nieodczytany prostokat kodu
+            bliskie = [k for k in kody if k["ean"] is None and
+                       abs(k["cx"] - self.xy[0]) + abs(k["cy"] - self.xy[1]) < SLEDZ_PROMIEN * szer]
+            biezacy = min(bliskie, key=lambda k: abs(k["cx"] - self.xy[0]) + abs(k["cy"] - self.xy[1]),
+                          default=None)
+
+        if self.cel is None:
+            if najblizszy:
+                self.cel = najblizszy["ean"]
+                biezacy = najblizszy
+                msg = f"SLEDZE {self.cel}"
+        elif biezacy is not None:
+            if biezacy["rozmiar"] < MIN_SZEROKOSC:
+                msg, self.cel, biezacy = f"{self.cel} ODDALILA SIE - puszczam", None, None
+            elif najblizszy and najblizszy["ean"] != self.cel and \
+                    najblizszy["rozmiar"] > biezacy["rozmiar"] * PRZELACZ_GDY:
+                msg = f"INNA BLIZEJ: {self.cel} -> {najblizszy['ean']}"
+                self.cel, biezacy = najblizszy["ean"], najblizszy
+        elif najblizszy:  # cel zniknal, ale jest inna butelka kaucyjna
+            msg = f"INNA BUTELKA: {self.cel} -> {najblizszy['ean']}"
+            self.cel, biezacy = najblizszy["ean"], najblizszy
+        elif teraz - self.widziany > ZGUBIONY_PO:
+            msg, self.cel = f"ZGUBIONA {self.cel} - puszczam", None
+
+        if biezacy is None:
+            if self.cel and not msg:
+                self._szukaj(st, teraz)
+            return msg
+        self.widziany, self.rozmiar = teraz, biezacy["rozmiar"]
+        self.xy = (biezacy["cx"], biezacy["cy"])
+        self.blad = ((biezacy["cx"] - szer / 2) / (szer / 2), (biezacy["cy"] - wys / 2) / (wys / 2),
+                     biezacy["ean"] is not None)
+        if msg:  # nowy cel - zacznij od nowa
+            self._reset()
+        # historia pozycji kodu (ostatnie 0.6 s) - do przewidywania, gdzie ucieka
+        self._hist = [h for h in self._hist if teraz - h[0] < 0.6] + [(teraz, self.blad[0], self.blad[1])]
+        self._szukano = 0.0
+        return self._steruj(st, msg, teraz)
+
+    def _szukaj(self, st, teraz):
+        """Kod chwilowo niewidoczny: jedz dalej tam, dokad uciekal (ograniczony czas i kat)."""
+        if not self._hist or teraz < self._nastepny or not hasattr(self, "g"):
+            return
+        od_utraty = teraz - self.widziany
+        if od_utraty > SLEDZ_SZUKAJ_CZAS or self._szukano >= SLEDZ_SZUKAJ_MAX:
+            return
+        (t0, x0, y0), (t1, x1, y1) = self._hist[0], self._hist[-1]
+        vx, vy = ((x1 - x0) / (t1 - t0), (y1 - y0) / (t1 - t0)) if t1 - t0 > 0.05 else (0.0, 0.0)
+        horyzont = min(od_utraty + SLEDZ_PAUZA, 1.0)
+        przew = {"x": max(-1.5, min(1.5, x1 + vx * horyzont)), "y": max(-1.5, min(1.5, y1 + vy * horyzont))}
+        stawy = {"x": SLEDZ_STAW_POZIOM, "y": SLEDZ_STAW_PION}
+        zostalo = SLEDZ_SZUKAJ_MAX - self._szukano
+        ruch = {}
+        for o, staw in stawy.items():
+            if abs(przew[o]) > SLEDZ_CEL:
+                d = -SLEDZ_KROK * przew[o] / self.g[o]
+                d = max(-min(SLEDZ_MAX_KROK, zostalo), min(min(SLEDZ_MAX_KROK, zostalo), d))
+                if abs(d) >= SLEDZ_MIN_KROK:
+                    st.target[staw] += d
+                    ruch[staw] = round(d, 1)
+        if ruch:
+            self._szukano += max(abs(d) for d in ruch.values())
+            self._nastepny = teraz + SLEDZ_PAUZA
+            self._w_celu = False
+            self._ostatni_ruch = None  # nie ucz czulosci z ruchow na slepo
+            self._probki = []
+            _log(f"SZUKAM cel={self.cel} przewidziany x={przew['x']:+.2f} y={przew['y']:+.2f} ruch={ruch} "
+                 f"lacznie {self._szukano:.0f} st.")
+
+    def _reset(self):
+        self._probki = []          # pomiary z nieruchomego obrazu po ostatnim ruchu
+        self._ostatni_ruch = None  # (blad_x, blad_y, ruch_x, ruch_y) - do nauki czulosci
+        self._w_celu = False       # wycentrowany -> stoi, dopoki kod wyraznie nie ucieknie
+        self._nastepny = 0.0
+        self._poprz = None
+        self._hist = []            # (czas, blad_x, blad_y) - do przewidywania ruchu kodu
+        self._szukano = 0.0        # ile st. przejechal "na slepo" od utraty kodu
+
+    def _steruj(self, st, msg, teraz):
+        """Popraw i poczekaj: mediana kilku klatek z nieruchomego obrazu -> jeden ruch -> pauza."""
+        if not hasattr(self, "_probki"):
+            self._reset()
+        if not hasattr(self, "g"):  # czulosc: o ile przesuwa sie kod (czesc polowy obrazu) na 1 st. stawu
+            self.g = {"x": SLEDZ_ZNAK_POZIOM * SLEDZ_CZULOSC_POZIOM, "y": SLEDZ_ZNAK_PION * SLEDZ_CZULOSC_PION}
+        stawy = {"x": SLEDZ_STAW_POZIOM, "y": SLEDZ_STAW_PION}
+        teraz_poz = {o: st.here[j] for o, j in stawy.items()}
+        rusza_sie = self._poprz and any(abs(teraz_poz[o] - self._poprz[o]) > 0.3 for o in stawy)
+        self._poprz = teraz_poz
+        # czekaj, az minie pauza i serwa stana - dopiero wtedy obraz jest aktualny i ostry
+        if teraz < self._nastepny or rusza_sie:
+            self._probki = []
+            return msg
+        self._probki.append(self.blad[:2])
+        if len(self._probki) < SLEDZ_PROBKI:
+            return msg
+        bx = sorted(p[0] for p in self._probki)[len(self._probki) // 2]
+        by = sorted(p[1] for p in self._probki)[len(self._probki) // 2]
+        self._probki = []
+        blad = {"x": bx, "y": by}
+
+        # nauka czulosci z poprzedniego ruchu (odrzuca pomiary, gdy butelka sama sie ruszyla)
+        if self._ostatni_ruch:
+            e0, d0 = self._ostatni_ruch
+            for o in stawy:
+                if abs(d0[o]) >= 1.0:
+                    g_obs = (blad[o] - e0[o]) / d0[o]
+                    if g_obs * self.g[o] > 0 and 0.3 <= g_obs / self.g[o] <= 3.0:
+                        self.g[o] += 0.4 * (g_obs - self.g[o])
+            self._ostatni_ruch = None
+
+        ruch = {}
+        prog = SLEDZ_START if self._w_celu else SLEDZ_CEL
+        for o, staw in stawy.items():
+            if abs(blad[o]) > prog:
+                d = -SLEDZ_KROK * blad[o] / self.g[o]
+                d = max(-SLEDZ_MAX_KROK, min(SLEDZ_MAX_KROK, d))
+                if abs(d) >= SLEDZ_MIN_KROK:
+                    st.target[staw] += d
+                    ruch[o] = d
+        self._w_celu = not ruch
+        if ruch:
+            self._ostatni_ruch = (blad, {o: ruch.get(o, 0.0) for o in stawy})
+            self._nastepny = teraz + SLEDZ_PAUZA
+        _log(f"cel={self.cel} x={bx:+.2f} y={by:+.2f} {'odczyt' if self.blad[2] else 'prostokat'} "
+             f"pan={st.here['pan']:.1f} wflex={st.here['wflex']:.1f} "
+             f"ruch={ {stawy[o]: round(d, 1) for o, d in ruch.items()} } "
+             f"czulosc x={self.g['x']:+.3f} y={self.g['y']:+.3f}{' W CELU' if self._w_celu else ''}")
+        return msg
+
+
 def tryb_kamera(port=None, mock=False):
     """Glowny program: okno kamery + sterowanie reczne + ogladanie puszki na sygnal."""
     import cv2
@@ -753,12 +1046,16 @@ def tryb_kamera(port=None, mock=False):
     arm = polacz(port, mock)
     st = Sterownik(arm)
     kam = otworz_kamere()
-    detektor = cv2.barcode.BarcodeDetector()
+    kaucje, sled = Kaucje(), Sledzenie()
+    sledz = SLEDZ
+    t_klatki = time.time()
     srv = serwer_http(arm)
     print(f"Pad: {'PODLACZONY' if st.pad_ok else 'brak (tylko klawiatura)'}")
     print(f"GOTOWY. Sygnal od RoArma: http://{moje_ip()}:{PORT_HTTP}/skanuj")
     print("Klikni w okno kamery i steruj:\n" + POMOC)
     tytul = "Ramie SO-101"
+    cv2.namedWindow(tytul, cv2.WINDOW_NORMAL)  # okno mozna zmniejszac/powiekszac
+    cv2.resizeWindow(tytul, 960, 540)
     komunikat, komunikat_do = "", 0.0
     byl_zajety = False
 
@@ -772,16 +1069,30 @@ def tryb_kamera(port=None, mock=False):
             ok, klatka = kam.read()
             if not ok:
                 continue
-            znalezione, kody, _typy, pkt = detektor.detectAndDecodeWithType(klatka)
-            if znalezione and pkt is not None:
-                for kod, rogi in zip(kody, pkt):
-                    rogi = rogi.astype(int).reshape(-1, 1, 2)
-                    kolor = (0, 200, 0) if kod else (0, 200, 255)
-                    cv2.polylines(klatka, [rogi], True, kolor, 3)
-                    if kod:
-                        cv2.putText(klatka, kod, tuple(rogi[0][0]), cv2.FONT_HERSHEY_SIMPLEX, 0.8, kolor, 2)
-                        if _zajety.is_set() and not stan["kod"]:
-                            stan["kod"] = kod
+            teraz = time.time()
+            dt, t_klatki = min(teraz - t_klatki, 0.2), teraz
+            wys, szer = klatka.shape[:2]
+            ostr = ostrosc(klatka)
+            kody = znajdz_kody(klatka)
+            for k in kody:
+                if k["ean"] is None:  # prostokat kodu bez odczytu (rozmazany)
+                    blisko = sled.xy and abs(k["cx"] - sled.xy[0]) + abs(k["cy"] - sled.xy[1]) < 5
+                    cv2.polylines(klatka, [k["rogi"]], True, (160, 160, 160), 6 if blisko else 2)
+                    (x0, y0), (x1, y1) = k["rogi"].min(axis=0)[0], k["rogi"].max(axis=0)[0]
+                    roi = klatka[max(y0, 0):y1, max(x0, 0):x1]
+                    if roi.size:  # ostrosc samego kodu - krec obiektywem, az wzrosnie i ramka zzielenieje
+                        cv2.putText(klatka, f"NIEOSTRY KOD {ostrosc(roi, calosc=True):.0f}",
+                                    (int(x0), max(int(y0) - 8, 40)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2)
+                    continue
+                kaucja = kaucje.sprawdz(k["ean"])
+                # zielony = kaucja, czerwony = bez kaucji, zolty = sprawdzam
+                kolor = (0, 200, 0) if kaucja else ((0, 0, 230) if kaucja is False else (0, 220, 255))
+                gruby = 6 if k["ean"] == sled.cel else 2
+                cv2.polylines(klatka, [k["rogi"]], True, kolor, gruby)
+                cv2.putText(klatka, f"{k['ean']} {k['rozmiar'] * 100:.0f}%", tuple(k["rogi"][0][0]),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, kolor, 2)
+                if _zajety.is_set() and not stan["kod"]:
+                    stan["kod"] = k["ean"]
 
             # sterowanie reczne tylko, gdy nie trwa automatyczny ruch
             if _zajety.is_set():
@@ -790,6 +1101,20 @@ def tryb_kamera(port=None, mock=False):
                 if byl_zajety:
                     st.po_zadaniu()
                     byl_zajety = False
+                if sledz:
+                    mial_cel = sled.cel is not None
+                    msg = sled.krok(kody, kaucje, szer, wys, st, dt)
+                    if msg:
+                        pokaz(msg)
+                        _log(msg)
+                    if sled.cel and teraz - getattr(sled, "_log", 0) > 0.3 and hasattr(sled, "blad"):
+                        sled._log = teraz
+                        ex, ey, odczyt = sled.blad
+                        print(f"  kod x={ex:+.2f} y={ey:+.2f} {'odczyt' if odczyt else 'prostokat'}"
+                              f" | pan={st.here['pan']:6.1f} wflex={st.here['wflex']:6.1f}"
+                              f" | cel pan={st.target['pan']:6.1f} wflex={st.target['wflex']:6.1f}")
+                    if mial_cel and sled.cel is None and PO_UTRACIE == "dom":
+                        zadanie(arm, do_domu, "dom")
                 pressed = st.krok()
                 if "y" in pressed or "start" in pressed:
                     zadanie(arm, ogladaj_puszke, "skan")
@@ -813,6 +1138,9 @@ def tryb_kamera(port=None, mock=False):
                     continue
                 elif c == "h":
                     zadanie(arm, do_domu, "dom") or pokaz("ramie zajete")
+                elif c == "t":
+                    sledz, sled.cel = not sledz, None
+                    pokaz(f"sledzenie {'WLACZONE' if sledz else 'WYLACZONE'}")
                 elif c == "m":
                     pokaz(zapisz_poze(arm, POZA_DOMOWA))
                 elif c == "p":
@@ -832,17 +1160,19 @@ def tryb_kamera(port=None, mock=False):
             if st.komunikat:
                 pokaz(st.komunikat)
                 st.komunikat = ""
-            gora = stan["stan"]
+            gora = stan["stan"] + (f" | SLEDZE {sled.cel}" if sled.cel else (" | sledzenie wl." if sledz else ""))
+            gora += f" | ostrosc {ostr:.0f}" + (" (NIEOSTRO - krec obiektywem)" if ostr < 60 else "")
             if stan["wynik"] and not _zajety.is_set():
                 w = stan["wynik"]
                 gora += f" | ostatni: {w.get('kod') or w.get('blad') or 'brak kodu'}"
                 gora += " (KAUCJA)" if w.get("kaucja") else ""
-            h, w_ = klatka.shape[:2]
+            h, w_ = wys, szer
+            cv2.drawMarker(klatka, (szer // 2, wys // 2), (255, 255, 255), cv2.MARKER_CROSS, 24, 1)
             cv2.rectangle(klatka, (0, 0), (w_, 28), (0, 0, 0), -1)
             cv2.putText(klatka, gora, (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
             cv2.rectangle(klatka, (0, h - 46), (w_, h), (0, 0, 0), -1)
             cv2.putText(klatka, st.opis()[:90], (6, h - 28), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 255, 200), 1)
-            cv2.putText(klatka, "ENTER ogladaj | WASD IJKL UO ruch | SPACJA chwyt | P/M/H pozy | Q koniec",
+            cv2.putText(klatka, "T sledzenie | ENTER ogladaj | WASD IJKL UO ruch | SPACJA chwyt | P/M/H | Q",
                         (6, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
             if komunikat and time.time() < komunikat_do:
                 cv2.putText(klatka, komunikat, (6, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
@@ -870,9 +1200,9 @@ if __name__ == "__main__":
     port = args[0] if args else None
     mock = "--mock" in sys.argv
     try:
-        if "--kamera" in sys.argv:
-            tryb_kamera(port=port, mock=mock)
-        else:
+        if "--bez-kamery" in sys.argv:
             sterowanie(port=port, mock=mock, http=True)
+        else:
+            tryb_kamera(port=port, mock=mock)
     except SO101Error as e:
         print("BLAD:", e)

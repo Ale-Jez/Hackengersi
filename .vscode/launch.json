@@ -1,0 +1,43 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Ramie: kamera + sledzenie butelki",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/dorm_keeper/ramie.py",
+      "cwd": "${workspaceFolder}/dorm_keeper",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Ramie: bez kamery (klawiatura)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/dorm_keeper/ramie.py",
+      "cwd": "${workspaceFolder}/dorm_keeper",
+      "console": "integratedTerminal",
+      "args": [
+        "--bez-kamery"
+      ]
+    },
+    {
+      "name": "Ramie: test kamery (ramie stoi)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/dorm_keeper/ramie.py",
+      "args": [
+        "--mock"
+      ],
+      "cwd": "${workspaceFolder}/dorm_keeper",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Pizza",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/dorm_keeper/pizza.py",
+      "cwd": "${workspaceFolder}/dorm_keeper",
+      "console": "integratedTerminal"
+    }
+  ]
+}
