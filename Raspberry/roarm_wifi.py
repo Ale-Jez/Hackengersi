@@ -1,6 +1,7 @@
-"""RoArm-M3 over WiFi. Commands: HTTP GET http://<ip>/js?json=...  (the reply is only {"ok":1}).
-Feedback: the ws://<ip>/ws websocket pushes {"T":-15, x y z (mm), b s e t r g (rad)} about once a
-second, measured from the servos (vendor/RoArm-M3_example/http_server.h + .ino loop).
+"""RoArm-M3 over WiFi: HTTP GET http://<ip>/js?json=...
+Position: {"T":105} returns {"T":1051, x y z (mm), tit, b s e t r g (rad), ...} in the HTTP reply
+(seen on this arm's firmware; the vendor source's ws://<ip>/ws feed did not connect, so it is not used).
+Gripper feedback g reads 0 on some firmware whatever the fingers do.
 
 Never send T:0: over USB it froze this arm's firmware ~10 s and the arm could drop.
 T:104 with spd 0 is silently ignored by the firmware, so spd must be > 0.
@@ -13,7 +14,6 @@ T:104 with spd 0 is silently ignored by the firmware, so spd must be > 0.
 import json
 import os
 import sys
-import threading
 import time
 
 import requests
@@ -22,21 +22,15 @@ import requests
 class RoArm:
     def __init__(self, ip, mock=False):
         self.ip, self.mock = ip, mock
-        self.fb, self._fb_t = {"x": 200.0, "y": 0.0, "z": 200.0}, 0.0
-        if mock:
-            return
-        import websocket  # websocket-client
+        self.fb = {"x": 200.0, "y": 0.0, "z": 200.0}  # mock pose
 
-        ws = websocket.WebSocketApp(f"ws://{ip}/ws", on_message=self._on_msg)
-        threading.Thread(target=ws.run_forever, kwargs={"reconnect": 2}, daemon=True).start()
-
-    def _on_msg(self, _ws, msg):
-        try:
-            d = json.loads(msg)
-        except ValueError:
-            return
-        if d.get("T") == -15:
-            self.fb, self._fb_t = d, time.monotonic()
+    def _get(self, cmd):
+        r = requests.get(f"http://{self.ip}/js", params={"json": json.dumps(cmd, separators=(",", ":"))},
+                         timeout=3)
+        r.raise_for_status()
+        if "error" in r.text:  # {"error":"Queue full"}
+            raise RuntimeError(f"roarm: {r.text}")
+        return r.text
 
     def send(self, cmd):
         if cmd.get("T") == 0:
@@ -44,16 +38,19 @@ class RoArm:
         if self.mock:
             print("  [roarm]", cmd)
             return
-        r = requests.get(f"http://{self.ip}/js", params={"json": json.dumps(cmd, separators=(",", ":"))},
-                         timeout=3)
-        r.raise_for_status()
-        if "error" in r.text:  # {"error":"Queue full"}
-            raise RuntimeError(f"roarm: {r.text}")
+        self._get(cmd)
 
-    def where(self, max_age=3.0):
-        if not self.mock and time.monotonic() - self._fb_t > max_age:
-            raise RuntimeError(f"no feedback from ws://{self.ip}/ws for {max_age}s (arm off / wrong IP?)")
-        return dict(self.fb)
+    def where(self):
+        """Measured pose: dict with x y z (mm), tit, b s e t r g (rad). Raises if the arm gives none."""
+        if self.mock:
+            return dict(self.fb)
+        try:
+            d = json.loads(self._get({"T": 105}))
+        except ValueError:
+            d = {}
+        if d.get("T") != 1051 or d.get("x") is None:  # nulls: servos unpowered / feedback invalid
+            raise RuntimeError(f"arm at {self.ip} gave no valid position (servo power off?): {d}")
+        return d
 
     def goto(self, x, y, z, t, g, spd=0.25, tol=15.0, timeout=12.0):
         """Tool point to x y z (mm, base frame: x forward, y left, z up), wrist pitch t and gripper g (rad).
@@ -67,7 +64,7 @@ class RoArm:
             return
         end = time.monotonic() + timeout
         while time.monotonic() < end:
-            time.sleep(0.5)  # feedback is ~1 Hz, faster polling buys nothing
+            time.sleep(0.3)
             p = self.where()
             if max(abs(p["x"] - x), abs(p["y"] - y), abs(p["z"] - z)) < tol:
                 return
@@ -82,19 +79,17 @@ if __name__ == "__main__":
     cfg = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")))
     arm = RoArm(cfg["roarm_ip"], mock=os.environ.get("MOCK") == "1")
     if sys.argv[1:2] == ["where"]:
-        time.sleep(2.5)
         print(arm.where())
     elif sys.argv[1:2] == ["send"]:
         arm.send(json.loads(sys.argv[2]))
     elif sys.argv[1:2] == ["wiggle"]:  # first-contact test: small moves around wherever it stands now
-        time.sleep(2.5)
         p = arm.where()
         print("at", {k: round(p[k], 2) for k in ("x", "y", "z", "tit", "g")})
-        x, y, z, t, g = p["x"], p["y"], p["z"], p["tit"], p["g"]
-        arm.goto(x, y, z + 40, t, g, spd=0.2)
-        arm.goto(x, y, z, t, g, spd=0.2)
+        g = p["g"] if p["g"] > 1 else cfg["grip_open"]  # g reads 0 on some firmware: don't command that
+        arm.goto(p["x"], p["y"], p["z"] + 40, p["tit"], g, spd=0.2)
+        arm.goto(p["x"], p["y"], p["z"], p["tit"], g, spd=0.2)
+        arm.gripper(cfg["grip_closed"])
         arm.gripper(cfg["grip_open"])
-        arm.gripper(g)
         print("wiggle ok")
     else:
         arm = RoArm("mock", mock=True)

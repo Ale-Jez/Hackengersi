@@ -1,5 +1,5 @@
 {
-  "roarm_ip": "192.168.4.1",
+  "roarm_ip": "10.26.188.135",
   "brev_url": "http://BREV-HOST:8000",
   "brev_model": "Qwen/Qwen2.5-VL-7B-Instruct",
   "camera": 0,

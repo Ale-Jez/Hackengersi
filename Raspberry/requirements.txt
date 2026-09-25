@@ -2,5 +2,4 @@ opencv-python>=4.7
 numpy
 requests
 pyserial
-websocket-client
 feetech-servo-sdk

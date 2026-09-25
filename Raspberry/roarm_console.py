@@ -1,6 +1,6 @@
 """Keyboard jog for the RoArm-M3 over WiFi (Pi terminal or Windows console).
 
-    python roarm_console.py             real arm, IP from config.json
+    python roarm_console.py [ip]        real arm, IP from the argument or config.json
     python roarm_console.py --selftest  key logic against a mock arm
 
  W/S  x forward / back (mm)        A/D  y left / right       R/F  z up / down
@@ -151,8 +151,13 @@ if __name__ == "__main__":
         selftest()
         sys.exit()
     cfg = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")))
-    arm = RoArm(cfg["roarm_ip"])
-    time.sleep(2.5)  # first websocket feedback
+    ip = sys.argv[1] if len(sys.argv) > 1 else cfg["roarm_ip"]
+    try:
+        requests.get(f"http://{ip}/", timeout=3)
+    except requests.RequestException:
+        sys.exit(f"cannot reach the arm at {ip}. 192.168.4.1 only works on the arm's own RoArm-M3 WiFi; "
+                 "on malina-net use the arm's hotspot IP: python roarm_console.py <ip>")
+    arm = RoArm(ip)
     with raw_keys():
         try:
             main(arm, cfg)
