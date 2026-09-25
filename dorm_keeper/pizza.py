@@ -8,12 +8,12 @@ Uruchom:  python pizza.py
      J/L zgiecie nadgarstka   U/O obrot nadgarstka   1/2/3 predkosc
 3. SPACJA = zacisnij na pudelku (zamyka az poczuje opor, potem trzyma).
 4. P = PODNIES pudelko powoli.   N = OPUSC z powrotem.
-5. SPACJA jeszcze raz = pusc.   ENTER = stop.   ESC = koniec.
+5. SPACJA jeszcze raz = pusc.   F = stop.   ESC = koniec.
 """
 
 import time
 
-import teleop
+import ramie
 
 # ---------------- USTAWIENIA ----------------
 OTWARCIE = 70.0        # kat otwartego chwytaka (wiecej = szerzej, max ~120)
@@ -43,4 +43,4 @@ def opusc(arm):
 
 if __name__ == "__main__":
     print(__doc__)
-    teleop.main(extra_keys={"p": podnies, "n": opusc}, on_start=otworz)
+    ramie.sterowanie(extra_keys={"p": podnies, "n": opusc}, on_start=otworz)
