@@ -126,6 +126,7 @@ def main(arm, cfg, pending=pending):
                       end="", flush=True)
             except (RuntimeError, requests.RequestException) as e:  # keep the session, drop this step
                 print("\n", e)
+                last = now + 1.0  # cool-off: don't hammer an arm that is not answering
         if quit_:
             print()
             return
@@ -163,3 +164,5 @@ if __name__ == "__main__":
             main(arm, cfg)
         except KeyboardInterrupt:
             print("\nbye")
+        except RuntimeError as e:  # e.g. no position at start
+            sys.exit(f"\n{e}")

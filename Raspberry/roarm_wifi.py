@@ -25,9 +25,12 @@ class RoArm:
         self.fb = {"x": 200.0, "y": 0.0, "z": 200.0}  # mock pose
 
     def _get(self, cmd):
-        r = requests.get(f"http://{self.ip}/js", params={"json": json.dumps(cmd, separators=(",", ":"))},
-                         timeout=3)
-        r.raise_for_status()
+        try:
+            r = requests.get(f"http://{self.ip}/js", params={"json": json.dumps(cmd, separators=(",", ":"))},
+                             timeout=2)  # a reply takes 0.4-0.6 s over the phone hotspot
+            r.raise_for_status()
+        except requests.RequestException as e:
+            raise RuntimeError(f"arm {self.ip} not answering ({type(e).__name__}): rebooting, busy or off WiFi?") from None
         if "error" in r.text:  # {"error":"Queue full"}
             raise RuntimeError(f"roarm: {r.text}")
         return r.text

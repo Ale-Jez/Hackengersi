@@ -14,7 +14,7 @@
   "grip_open": 1.57,
   "grip_closed": 3.14,
   "roarm_spd": 0.25,
-  "reach_mm": [120, 450],
+  "reach_mm": [120, 380],
   "park": [200, 0, 250],
   "bins": {
     "cans_bottles": [0, 300, 150],
