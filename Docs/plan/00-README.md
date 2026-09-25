@@ -1,60 +1,63 @@
-# HexaSweep: Alien Bazaar Hackathon Plan
+# Kaucjobot: Alien Bazaar Hackathon Plan
 
-Team of 4, about 2 days, one robot. This folder is the whole plan. Read this file first (5 min), then your role in `04`.
+Team of 4, about 2 days, one walking robot plus two arms. This folder is the whole plan. Read this file first (5 min), then your role in `04`.
 
 ## TL;DR
 
-**Build:** a hexapod that walks a small "living room" course, spots debris with its camera, walks up to it, and hands off to the partner team's **TriArm** to pick it up and drop it in a bin. The counter goes up on a live dashboard.
+**Build:** a home **return machine (RVM) on legs**. CubeBot (our quadruped) finds an empty bottle on the floor and pushes it into a **docking bay**. The **SO-101** rolls the bottle in place until the overhead camera reads its **EAN**. The station checks the EAN against the deposit list, like a shop till does. The **RoArm-M3 Pro** drops deposit containers into the bag and everything else into the reject bin. The big screen goes *ding* and adds **0.50 PLN**. At the end a **voucher** comes out through the Kaucja.pl OpenAPI flow (`POST /transaction`).
 
-**Why it wins:** the brief is a two-team hardware collaboration (our mobility base + Guardians of the Hardware's TriArm). At a "bazaar" the **integration is the product**. We show one clean, repeatable end-to-end loop, not five half-working features.
+**Why it wins:** a real, current problem (Poland's deposit system, running since October 2025), a physical loop anyone understands in five seconds, three robots handing off to each other, a real barcode check, and money at the end.
 
-**How we stay doable:** we reuse the team's existing CubeBot stack (leg IK, body pose, Pico servo link, Hailo vision, IMU) instead of writing from scratch. We do **not** use RL, SLAM, stairs, custom-trained models or real grasp planning. The robot aligns itself to a fixed "pick zone" using vision and the arm replays taught poses.
+**How we stay doable:** the dock is a **mechanical funnel**. Every bottle ends up in the same place, so both arms replay **taught poses**, with no arm vision and no grasp planning. CubeBot already walks and turns and already runs Hailo detection. Barcode reading is an off-the-shelf library on a fixed webcam. The deposit API is a mock with the real endpoint shapes (`../drs-api.md`). We write glue, not research.
 
 ## Files
 
 | File | What's in it |
 |---|---|
-| `00-README.md` | This page: TL;DR, assumptions, questions for organizers, rules |
-| `01-concept-and-scope.md` | Demo story, autonomy loop, scope tiers, explicit cut list |
-| `02-architecture.md` | System design, module layout, interfaces, CubeBot reuse map, power |
-| `03-timeline-and-gates.md` | Hour-by-hour plan, go/no-go gates, bench schedule, git rules |
+| `00-README.md` | This page: TL;DR, hardware, assumptions, questions for organizers, rules |
+| `01-concept-and-scope.md` | Demo story, dock design, autonomy loop, scope tiers, cut list |
+| `02-architecture.md` | System design, interfaces, reuse map, power |
+| `03-timeline-and-gates.md` | Hour-by-hour plan, go/no-go gates, git rules |
 | `04-workstreams.md` | 4 roles, tasks, acceptance criteria, time budgets |
 | `05-risks-and-fallbacks.md` | Risk register, fallback ladders, kill criteria |
 | `06-demo-and-submission.md` | 3-min demo script, pitch, Q&A, submission checklist |
+| `../arm.md` | RoArm-M3 Pro and SO-101: jobs, commands, teaching |
+| `../drs-api.md` | Kaucja.pl OpenAPI: what it offers, what it doesn't, how we use it |
 
-## What we found in the material
+## Hardware we have
 
-- `docs/description.md`: **hexapod** chassis + navigation + debris finding (us), partnered with **Guardians of the Hardware** whose **TriArm** does gripping. Domestic terrain: stairs, thick carpet, thresholds, clutter.
-- TriArm (tnkr.ai, `theaiwhisperers-workspace/tri-arm`): 3D-printed **6-axis SO-100 arm + 8-DOF 4-finger hand**, $300 kit, originally a wearable limb.
-- `CubeBot-Code/` is a **quadruped**, not a hexapod. It is our code base to reuse, and its RL gaits do **not** transfer to six legs. Details in `02`.
+- **CubeBot** (`CubeBot-Code/`): quadruped, 12 PWM servos through a Pico, Raspberry Pi + Hailo-8L, Pi camera, WT901 IMU, 3 status LEDs. It has a waypoint walk gait (`walk_points`), a turn-right gait (`rotate_right_points`), an RL crawl policy (`RL/walk/models/crawl.onnx`) and a bottom-strip depth obstacle check.
+- **1x RoArm-M3 Pro** (picker) and **1x SO-101 follower** (scanner/roller). No leader arms (`../arm.md`).
+- Models on disk: `yolo11n_coco` / `yolo26n_coco` HEF (COCO includes `bottle` and `cup`, **not** `can`), `best_ball_v8n`, `scdepthv3` depth.
+- To buy or bring: 1080p USB webcam with manual focus, desk lamp, cardboard/foamboard, 2 wooden or aluminium strips for the V-groove.
 
 ## Assumptions (verify in the first hour)
 
 | # | Assumption | If wrong |
 |---|---|---|
-| A1 | We get or build a **6-leg, 3-DOF/leg (18 servo)** hexapod with a **Raspberry Pi + Hailo-8L + camera + IMU**, like CubeBot | Gate G0 in `03`. Adapt gait/config only; the architecture stays the same |
-| A2 | The **TriArm** is physically provided by the partner team and can be mounted on the hexapod | Manipulation fallback ladder in `05` |
-| A3 | "Alien Bazaar" rewards **cross-team integration + a working live demo**, and probably a **tnkr.ai project page** (docs, BOM, code) | Ask organizers (below). Cheap to satisfy either way |
-| A4 | The CubeBot repo (github.com/VGlukhov-git/CubeBot) is ours to reuse | Confirm with its author. Credit it in the README either way |
-| A5 | Pre-existing code is allowed if declared | Check the rules. If not allowed, use it as reference and rewrite the ~500 lines that matter |
-| A6 | Demo is a live table/floor course, about 3 minutes, and we control the space | Backup video covers us (`06`) |
+| A1 | Organizers accept this concept even though the original brief was hexapod + TriArm (older version in git) | Ask first. If a hexapod is mandatory, the same dock + arms + station work with a hexapod pusher; only the gait changes |
+| A2 | CubeBot walks forward and turns on the demo floor with a 100-200 g bumper attached | Gate G1. Fallback: teleop pushing (`05`) |
+| A3 | The RoArm takes serial commands on its own (no leader), and the SO-101 is calibrated and moves under LeRobot/Feetech | Gate G1. Fallback: the other arm does both jobs (`05`) |
+| A4 | Demo containers are **empty 0.5 L PET bottles** (Tier 1); cans are Tier 2 | Bigger bottles need a bigger dock and new poses, about 1 h |
+| A5 | There is **no real Kaucja.pl API access** during the event; we use a mock with the same endpoints | If a sandbox exists, switch the URL + auth in `demo.yaml` (1-2 h) |
+| A6 | A webcam can read the EAN-13 on a curved 0.5 L label at about 30 cm under a lamp | Test before kickoff. Fallback: USB barcode scanner over the pocket |
+| A7 | Pre-existing code (CubeBot, RoArm firmware, LeRobot) is allowed if declared | Check the rules |
+| A8 | We control a floor area of about 2 m x 1.5 m for the demo | Shrink the arena, dock stays the same |
 
 ## Ask organizers in the first 30 minutes
 
-1. Judging criteria and weights. Is there a rubric?
-2. Exact hardware we receive: hexapod frame, servos count/type, battery, Pi/Hailo/camera, power supplies. Who supplies TriArm and when?
-3. Is there a workshop (3D printer, drill, cable, soldering) for the arm-to-hexapod mount?
-4. Submission format: repo, video, tnkr project, slides? Deadline time and demo slot length.
-5. Are pre-existing repos allowed? Any code-freeze rule?
-6. Venue network (WiFi reliability) and demo-space size/floor type.
-7. Rules on the partner interface: who on Guardians of the Hardware do we talk to, and do they build the mount or we do?
+1. Is the concept change acceptable (A1)? What are the judging criteria and weights?
+2. Any contact at Kaucja.pl or another deposit operator for an API sandbox or an EAN list (A5)?
+3. Demo slot length, floor space, floor type (smooth is easier for pushing than carpet).
+4. Submission format (repo, video, slides, tnkr page?) and deadline.
+5. Are pre-existing repos allowed? Is there a workshop (cardboard, hot glue, 3D printer)?
+6. Venue WiFi. We plan to run fully local anyway.
 
 ## Rules of engagement
 
-1. **MVP loop first.** Nothing from Tier 2 starts until Tier 1 works end to end on the real robot.
-2. **Integration over features.** One integration test on hardware beats a great module that has never met the robot.
-3. **Gates are binary.** At each gate (`03`) the lead decides in 5 minutes: go, or cut and fall back. No debate after that.
-4. **One owner per directory.** No cross-edits without telling the owner. Trunk-based git, small commits, only `main` goes on the robot.
-5. **One robot, four people.** Use the bench schedule and `--mock` mode (`02`) so nobody idles.
-6. **Freeze and sleep.** Feature freeze is 4 h before the demo. Everyone sleeps at least 5 h. A tired team breaks a working robot.
-7. **Everything runs local.** No cloud, no internet dependency in the demo.
+1. **MVP loop first.** One bottle: push → dock → pick → bag → +0.50 PLN. Scanning, sorting and vouchers are layered on top, never in the way.
+2. **Mechanics before code.** If a cardboard wall solves it, don't write software for it.
+3. **Gates are binary.** At each gate (`03`) the lead decides in 5 minutes: go, or fall back. No debate after that.
+4. **One owner per directory.** Trunk-based git, small commits, only `main` runs on the hardware.
+5. **Freeze and sleep.** Feature freeze 4 h before the demo. Everyone sleeps at least 5 h.
+6. **Everything runs local.** No cloud or internet dependency in the demo (the mock deposit API runs on the laptop).

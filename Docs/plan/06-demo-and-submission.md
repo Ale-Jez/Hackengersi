@@ -2,65 +2,69 @@
 
 ## Demo run (3 minutes, adjust to the slot)
 
-Two people: **Narrator** (R4) and **Operator** (R1 or R2, hands on the gamepad E-STOP). R3 stands by with the spare batteries and the reset kit.
+Three people: **Narrator** (R4), **Operator** (R1, gamepad E-STOP for CubeBot), **Station keeper** (R3, hand on the arms' power strip). R2 watches the dashboard and flips fallbacks.
 
-| Time | Robot / screen | Narrator says |
+| Time | Robots / screen | Narrator says |
 |---|---|---|
-| 0:00-0:20 | Robot standing on the course; dashboard on a laptop | Problem: robot vacuums stop at thresholds, carpets, clutter. Homes need something that can walk over them |
-| 0:20-0:40 | Point to the arm and hexapod | Two teams, two hardware projects: our hexapod base + Guardians of the Hardware's TriArm. Today we show them working as one machine |
-| 0:40-2:00 | Press START. SEARCH -> APPROACH -> obstacle turn -> rug/threshold -> ALIGN -> PICK -> DROP; the counter goes up | Narrate live what the dashboard shows: sees debris, steers, avoids the box, crosses the rug, aligns, arm picks, drops. Say "this is autonomous" only in `auto` mode |
-| 2:00-2:20 | Second item (if Tier 2 is stable) | Same loop repeats, counter = 2 |
-| 2:20-2:40 | Tilted board: body-leveling | Same legs, IMU feedback keeps the body level: what a wheeled base cannot do |
-| 2:40-3:00 | Slide: what's next | Next: stairs, real household debris, on-board sensing... (only claims we can back) |
+| 0:00-0:20 | Arena with containers on the floor; big screen shows **0,00 zł** | Hold up a bag of empties: "Every Polish kitchen has one of these. Each bottle is 50 groszy, but only if someone collects it and takes it back." |
+| 0:20-0:35 | Point to CubeBot, then to the dock with both arms | "This is a return machine on legs. One robot to collect from anywhere on the floor, two arms to check and bag in one known spot." |
+| 0:35-1:40 | Press START. CubeBot searches, walks to a bottle, pushes it into the funnel, backs off. SO-101 rolls it, **beep**, the EAN and product name appear, ACCEPT. RoArm bags it. Counter **+0,50 zł** with a ding | Narrate what the dashboard shows: sees the bottle, steers, finds the dock, hands off, reads the barcode, checks the deposit list, bags. Say "autonomous" only in `auto` mode |
+| 1:40-2:10 | CubeBot brings the jar (or a non-deposit item). Scan → **REJECT** → reject bin, buzz | "Not every container has a deposit. Like a real machine, it checks the barcode and rejects this one." |
+| 2:10-2:30 | Another bottle or a can if Tier 2 is stable | Counter 1,00 zł |
+| 2:30-2:45 | Press **Voucher**: `POST /transaction` → voucher QR + amount on screen | "The station follows the Kaucja.pl OpenAPI flow: one transaction, one voucher. Take the bag and the voucher to the shop." |
+| 2:45-3:00 | Slide: what's next | Real API access, bag sealing (`/bag-replacement`), more container types (only claims we can back) |
 
-**Pre-run checklist (60 s):** batteries fresh, E-STOP tested, `demo.yaml` loaded, dashboard reachable, camera exposure locked, course set (same as the rehearsals), debris placed with marks on the floor.
+**Pre-run checklist (60 s):** batteries fresh, both arms at `home`, both E-STOPs tested, `demo.yaml` loaded, mock DRS running, dashboard on the big screen, lamp on and camera focus locked, dock taped in its marks and empty, bag and reject bin empty, counter at 0, containers on their floor marks.
 
-**If it breaks live:** do not apologise or improvise. Say "switching to operator-assist", flip `semi` (or `teleop`) and continue; if the robot is down, play the backup video and walk through the dashboard log. Prepared, calm failure handling scores better than a silent crash.
+**If it breaks live:** don't apologise or improvise. Say "switching to operator assist" and step down one rung of the right ladder in `05`. A prepared, calm fallback scores better than a silent crash. If everything is down, play the backup video.
 
-## Honest framing (use in pitch and README)
+## Honest framing (pitch and README)
 
-- The **perception, navigation, gait and leveling are live.**
-- The **arm's pick/drop poses are taught**, and the robot's job is to bring the debris to the pick zone using vision.
-- Prior art declared: CubeBot open-source repo (leg IK, servo link, vision workers) and the TriArm (partner team). New during the event: hexapod gait, integration, state machine, dashboard, demo course.
+- **Live:** container detection, dock finding, walking, pushing, the handoff between three robots, barcode reading, accept/reject, counter.
+- **Taught:** both arms' poses, recorded once by hand and replayed. The dock is designed so that this is enough.
+- **Mocked:** the Kaucja.pl server. Our client follows the official OpenAPI quick start (`POST /transaction`, vouchers, bag replacement); the API is open only to registered shops, so today it talks to our mock. The deposit list is local, like a shop till's.
+- **Prior work, declared:** CubeBot (leg IK, gait tables, Hailo pipeline), RoArm firmware setup, SO-101 / LeRobot. New during the event: pusher behaviour, dock and bumper design, scan-and-roll station, handoff protocol, DRS client, dashboard.
 
 ## Slides (5 only)
 
-1. Title + team + partner + one-line pitch.
-2. Problem: domestic terrain vs wheeled robots. **Add a sourced number only if we have one; do not invent statistics.**
-3. Solution diagram (from `02`): hexapod + TriArm, sensors, brain.
-4. What we built in 2 days: photos of the robot, dashboard screenshot, the Tier that works.
-5. What's next + credits (CubeBot, TriArm/Guardians of the Hardware, open-source libraries).
+1. Title, team, one-line pitch, photo of the bag of bottles.
+2. Problem: deposit system since October 2025, 0.50 PLN per container, the bag in the kitchen. **Use only sourced numbers.**
+3. Solution diagram (from `02`): CubeBot → dock → SO-101 roll + scan → RoArm → bag/reject → voucher (Kaucja.pl API flow).
+4. What we built in 2 days: photos, dashboard screenshot, which Tier works, success rates from the rehearsal log.
+5. What's next + credits.
 
 ## Q&A prep
 
 | Likely question | Short answer |
 |---|---|
-| Why a hexapod, not wheels or tracks? | Thresholds/carpet/stairs and clutter. Legs step over, and a tripod gait is statically stable |
-| Is the grasp autonomous? | The robot autonomously finds and aligns; the arm replays taught poses. Grasp planning is next |
-| How does it avoid obstacles? | Hailo-accelerated monocular depth, bottom strip, reactive stop/turn |
-| What did you build vs reuse? | CubeBot code as base (credited). New: 6-leg config, tripod gait, leveling, brain, dashboard, integration with TriArm |
-| How would it work on real household debris? | Swap the detector (train on household classes), same pipeline. Not done here because of the Hailo compile and dataset time |
-| How does the interface between the two teams work? | Mount + separate power rail + `arm.go(name)` API; the arm team's driver is called through one function |
-| What was the hardest problem? | Whichever real one it was (power, gait on carpet, grasp reliability). Answer with data from the logs |
-| Cost? | Add BOM total on the slide (from the parts list). Do not guess |
+| Is it connected to the real deposit system? | The client follows the Kaucja.pl OpenAPI; the API is for registered shops, so the demo uses a mock with the same calls. Switching is a config change once a station ID and credentials are issued |
+| How do you know it's a deposit container? | EAN check against a deposit list, same as a shop till: the till accepts or rejects locally, then reports the transaction |
+| Why does the second arm roll the bottle? | The barcode can be anywhere on the curved label. Rolling brings it under the camera, like the rollers in a real return machine |
+| Why not put an arm on the robot? | 12 small leg servos can't carry a 12 V arm, and fixed arms at a known spot are far more reliable. The dock does the precision |
+| Is the pick autonomous? | Triggered, verified and routed automatically; the motion is a taught pose. The dock guarantees the bottle's position |
+| How does it find the dock? | An ArUco marker on the back wall, seen by the robot's camera |
+| Does it crush the bottles? | No. The gripper angle is taught on a real bottle, because a crushed bottle loses its deposit |
+| Why a legged robot for this? | Home floors have rugs, cables and thresholds. And it's the platform we have: we say so openly |
+| Hardest problem? | Answer with the real one from the logs |
+| Cost? | BOM total from the parts list. Don't guess |
 
-## Submission checklist (R4 owns; complete by T-1h)
+## Submission checklist (R4 owns; done by T-1h)
 
-- [ ] Repo public/shared with a clear `README.md`: what it is, how to run (`HEXA_MOCK=1` and real), architecture picture, credits, licence.
-- [ ] `docs/plan/` stays in the repo (shows planning discipline); add `decisions.md` with the real gates and fallbacks taken.
-- [ ] 60-90 s **video**: robot doing the loop, dashboard, one leveling clip. Two takes, best one exported.
-- [ ] 5 slides exported to PDF as a backup.
-- [ ] tnkr.ai project page (docs, BOM, photos, repo link, hexapod <-> TriArm mount notes) **if the event uses tnkr** (A3, verify).
-- [ ] Photos: chassis, arm mounted, wiring, close-ups of the interface.
+- [ ] Repo with a clear `README.md`: what it is, how to run (mock and real), diagram, credits, licence.
+- [ ] `docs/` in the repo (plan, `arm.md`, `drs-api.md`), plus `decisions.md` with the real gates and fallbacks taken.
+- [ ] 60-90 s **video**: one full accept cycle and one reject, counter and voucher visible. Two takes, best one exported.
+- [ ] 5 slides exported to PDF.
+- [ ] Photos: CubeBot with the bumper, the dock, the SO-101 rolling, the RoArm mid-pick, the dashboard.
+- [ ] Dock build notes (dimensions, camera height, lamp position) so anyone can rebuild it.
 - [ ] BOM and rough cost.
-- [ ] Team members and roles; partner team credited.
-- [ ] Rehearsal log (pass/fail table) saved in `runs/`.
-- [ ] Everything copied to a USB stick and to a laptop that does not need the internet.
+- [ ] Team members and roles.
+- [ ] Rehearsal log saved in `runs/`.
+- [ ] Everything on a USB stick and on a laptop that doesn't need internet.
 
 ## Rehearsal log template
 
-| # | Time | Mode | Result | Time to finish | Failure cause | Fix |
-|---|---|---|---|---|---|---|
-| 1 | | auto | | | | |
+| # | Time | Pusher mode | Scan (rolls needed) | Decision correct? | Bin correct? | Time per container | Failure cause | Fix |
+|---|---|---|---|---|---|---|---|---|
+| 1 | | auto | | | | | | |
 
-Need at least 5 consecutive runs logged before T-1h. Pick the demo mode from the data: full `auto` only if at least 4 of the last 5 passed.
+At least 5 consecutive runs logged before T-1h. Use full `auto` in the demo only if at least 4 of the last 5 passed.
