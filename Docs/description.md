@@ -1,1 +1,21 @@
-Every Polish home now has a bag of empty bottles and cans that is worth money. Since the deposit-return system started in October 2025, each plastic bottle and can carries a 0.50 PLN deposit, but only if it is a registered deposit container and reaches the return point in one piece. Kaucjobot is a home return machine on legs. CubeBot, our camera-guided quadruped, finds empty containers on the floor and walks them into a docking bay. There an SO-101 arm rolls each container under a camera until its barcode is read, and the EAN is checked the way a shop till does it. A RoArm-M3 Pro then drops deposit containers into the bag and everything else into a reject bin. The station follows the Kaucja.pl OpenAPI flow (transaction → voucher → bag replacement), so at the end the user gets a voucher showing exactly how much money is in the bag.
+Driving trash can
+
+Navigating via hardcoded routes and april tags
+
+
+
+then there are two robo arms, 1xRoArm which is the main one for picking up trash
+and 1xSo-arm-101 which has the camera and takes a picture of the trash can content.
+
+both of them and the camera are managed by the raspberry pi 5 8gb. 
+camera and so-101 are connected via usb cable to the raspberry
+and the roarm m3 is connected via wifi to the raspberry pi
+
+the raspberry pi manages these two arms and sends the images of the trash can to my nvidia brev, where there will be an LLM analyzing this photo and what there is, then it should map the objects so that the arms can pick the trash and sort them to one of the three containers.
+
+One container: cans and bottles
+second container: paper
+third container: random plastic
+
+
+
