@@ -16,7 +16,7 @@ import os
 import sys
 
 from roarm import MockRoArm, RoArm, RoArmError
-from so101 import MockSO101, SO101, SO101Error
+from ramie import MockSO101, SO101, SO101Error
 
 ARM_ERRORS = (RoArmError, SO101Error)
 GRIPPER_KEY = "_gripper"

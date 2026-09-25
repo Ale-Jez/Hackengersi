@@ -1,10 +1,18 @@
 {
   "spoczynek": {
-    "pan": 9.5,
-    "lift": -26.3,
-    "elbow": 61.5,
-    "wflex": 16.0,
-    "wroll": 27.4,
-    "grip": 3.2
+    "pan": 9.2,
+    "lift": -37.4,
+    "elbow": 22.5,
+    "wflex": -11.3,
+    "wroll": -85.0,
+    "grip": 27.1
+  },
+  "skan1": {
+    "pan": 9.1,
+    "lift": -37.4,
+    "elbow": 22.5,
+    "wflex": -11.3,
+    "wroll": -85.0,
+    "grip": 27.1
   }
 }
