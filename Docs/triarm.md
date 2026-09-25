@@ -1,1 +1,0 @@
-https://tnkr.ai/theaiwhisperers-workspace/tri-arm#overview

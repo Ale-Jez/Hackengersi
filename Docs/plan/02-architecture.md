@@ -1,132 +1,148 @@
 # 02: Architecture
 
-Single Raspberry Pi runs everything. Laptop/phone only opens the dashboard. No cloud.
+Two computers, one local network, no cloud.
 
 ```
-                       +------------------ Raspberry Pi (Hailo-8L) -------------------+
- Camera --picamera2--> | perception  --targets, obstacle-->  brain (state machine)     |
-                       |  (Hailo: ball/YOLO, depth; HSV fallback)   |     |            |
- IMU (WT901, I2C) ---> | legs: gait + IK + body leveling  <--vx,vy,wz,body pose--+    |
-                       |   |                                                  |       |
-                       |   +--UART 230400--> Pico (PWM) --> 18 leg servos     |       |
-                       | arm: TriArm driver <--go("pick"|"drop"|"stow")-------+       |
-                       |   +--USB/serial--> SO-100 bus servos + hand              |   |
-                       | ui: HTTP page (MJPEG + status + E-STOP)  <----- status ------+
-                       +---------------------------------------------------------------+
- Gamepad (evdev) -> teleop + E-STOP          LEDs (GPIO 17/27/22) -> state colours
+ +------------- CubeBot (Raspberry Pi + Hailo-8L) --------------+
+ | Pi camera -> vision: container (COCO/HSV) + ArUco dock       |
+ |                 |                                            |
+ |                 v                                            |
+ |           pusher brain (SEARCH/APPROACH/PUSH/BACK_OFF)       |
+ |                 | walk / turn / back                         |
+ |                 v                                            |
+ |           gait (walk_points, rotate_*) -> UART -> Pico -> 12 servos
+ +-----------------|--------------------------------------------+
+                   | HTTP  POST /robot {state, clear}
+                   v
+ +------------- Station (laptop, next to the dock) ------------------------+
+ | overhead USB webcam -> dock.py (pocket full? robot in arm zone?)        |
+ |                     -> scan.py (EAN via zxing-cpp)                      |
+ | station brain: clear + full -> scan (+ SO-101 roll) -> decide -> pick   |
+ |    +-- USB serial (JSON) ------> RoArm-M3 Pro  (picker)                 |
+ |    +-- USB serial (Feetech) ---> SO-101        (roller)                 |
+ |    +-- deposit_eans.json (local accept/reject, like a shop till)        |
+ |    +-- drs.py --HTTP--> mock_drs.py (localhost) | real Kaucja.pl if granted
+ | dashboard: counter in PLN, last EAN, both states, video, voucher QR, E-STOP
+ +-------------------------------------------------------------------------+
+ Network: laptop hotspot or a travel router. Both arms are on USB.
 ```
+
+Why split it this way: the arms, the camera, the EAN list and the counter never move, so they live on the laptop. The Pi only does what has to ride on the robot. The two halves talk through **one HTTP endpoint**, so they can be built and tested separately.
 
 ## Repo layout (new repo, `git init` at hour 0)
 
 ```
-hexasweep/
-  hw/         servo_uart.py (from CubeBot), imu.py (wt901), leds.py, mock.py
-  legs/       kinematics (Arm, Body reused), gait.py (tripod), level.py, config_hex.py, calib.json
-  perception/ camera.py, detect.py (Hailo ball/YOLO), blob.py (HSV fallback), depth.py, pickzone.json
-  arm/        triarm.py (driver wrapper), poses.json, record_pose.py
-  brain/      states.py, main.py
-  ui/         server.py, static/index.html
-  tools/      servo_zero.py, gait_preview.py, log_replay.py
-  docs/       (this plan lives at repo root docs/plan)
+kaucjobot/
+  robot/      (runs on the Pi)
+    hw.py         servo link + LEDs + mock (from CubeBot devices/servo_uart.py)
+    gait.py       walk_fwd / walk_back / turn_left / turn_right, one gait cycle per call
+    vision.py     Hailo COCO bottle detector + HSV fallback + ArUco dock marker
+    pusher.py     state machine, talks to the station
+  station/    (runs on the laptop)
+    roarm.py      RoArm JSON over serial: go(pose), grip(open|close), torque(on|off)
+    so101.py      SO-101 over the Feetech bus: go(pose), roll(), torque(on|off)
+    teach.py      teach.py <arm> <pose>: torque off, move by hand, Enter saves -> poses.json
+    dock.py       overhead camera ROIs: pocket full? robot in arm zone?
+    scan.py       EAN decode from the overhead frame
+    drs.py        Kaucja.pl client: transaction, get_voucher, redeem_voucher, bag_replacement
+    server.py     HTTP: /robot, /status, /estop, /voucher + dashboard page
+    static/index.html
+  tools/      mock_drs.py, log_replay.py
+  config/     poses.json, dock_roi.json, deposit_eans.json, demo.yaml, so101_calibration.json
 ```
 
-One owner per top-level dir (see `04`). Models (`*.hef`, about 300 MB) stay **out of git** (shared folder or `git lfs`). Copy only `best_ball_v8n.hef`, `scdepthv3...hef`, `yolov11n.hef` to the Pi.
+Models (`*.hef`) stay **out of git**; copy only `yolo11n_coco...hef` to the Pi.
 
-## Interfaces (agree at hour 1, then everyone codes to mocks)
+## Interfaces (agree at hour 1, then everyone codes against mocks)
 
 ```python
-# perception -> brain  (latest value, thread-safe, ~15-30 Hz)
-Perception = {
+# robot/vision.py -> robot/pusher.py   (latest value, ~15 Hz)
+Seen = {
   "t": float,
-  "targets": [{"cls": "ball", "conf": 0.0-1.0,
-               "cx": 0-1, "cy": 0-1, "w": 0-1, "h": 0-1}],   # normalised image coords
-  "obstacle": {"clear": bool, "min_depth": float, "left": float, "right": float},
+  "item": {"cx": 0-1, "cy": 0-1, "w": 0-1, "h": 0-1, "conf": 0-1} | None,   # closest container
+  "dock": {"cx": 0-1, "size": 0-1} | None,                                    # ArUco marker
 }
 
-# brain -> legs
-legs.set_cmd(vx: float, vy: float, wz: float, body=None)   # body = {"roll","pitch","yaw","z"}
-legs.stop(); legs.stand(); legs.sit()
+# robot/gait.py  (blocking, one gait cycle per call, so the brain re-checks vision between steps)
+walk_fwd(n=1); walk_back(n=1); turn_left(n=1); turn_right(n=1); stand(); sit()
 
-# brain -> arm  (blocking calls with timeout, return True/False)
-arm.go(name)      # "stow" | "ready" | "pick" | "drop"
-arm.hand("open" | "close")
+# robot -> station  (HTTP, JSON)
+POST /robot  {"state": "PUSH", "clear": false}      # "clear": true once BACK_OFF is finished
+GET  /status -> {"station": "IDLE|SCANNING|PICKING|DONE", "count": 3, "pln": 1.50, "estop": false}
 
-# everything -> ui
-status = {"state": str, "counter": int, "tilt": [roll, pitch], "fps": {...}, "mode": "auto|semi|teleop", "log": [...]}
+# station arms (same shape for both)
+roarm.go("home" | "above_pocket" | "pick" | "lift" | "above_bag" | "above_reject")
+roarm.grip("open" | "close")        # "close" = taught angle that holds without crushing
+so101.go("home" | "above_pocket"); so101.roll()     # one quarter turn of the bottle
+arm.torque(False)                   # for teaching
+
+# station/scan.py
+scan.read(frame) -> "5901234123457" | None
+
+# station/drs.py  (mirrors ../drs-api.md; base URL + auth from demo.yaml)
+drs.transaction(station_id, eans: list[str]) -> {"voucher_id": str, "amount": float}
+drs.get_voucher(voucher_id) -> {"status": ..., "amount": ...}
+drs.bag_replacement(station_id, seal_code, eans) -> ok
 ```
 
-Rules: perception never moves anything; legs never read the camera; only the brain talks to both. This is what lets four people work in parallel.
+Request and response bodies for the real API are unknown (the quick start has no schemas). `mock_drs.py` defines our own. If we get real access, only `drs.py` changes.
 
-## Mock mode (`HEXA_MOCK=1`)
+**Safety rules:**
+- Arms move only after the robot reports `clear: true` **and** `dock.py` sees no robot in the arm zone.
+- **Only one arm moves at a time.** The SO-101 goes back to `home` before the RoArm leaves `home`, and the other way round. The station brain holds one lock.
+- The pusher does not walk forward while the station is not `IDLE`.
 
-The CubeBot code opens the serial port at **import time** (`devices/servo_uart.py`), so nothing runs on a laptop today. Fix first (30 min, R4): `hw/mock.py` provides `MockServo` (prints or logs angles), `MockIMU`, `MockCamera` (webcam or a recorded video). `Arm` already takes a `device` in its props, so it's a one-line injection. This lets legs/gait/brain/UI be developed without the robot.
+## Mock mode (`KAUCJO_MOCK=1`)
 
-## Reuse map (CubeBot -> HexaSweep)
+CubeBot opens the serial port **at import time** (`devices/servo_uart.py`), so nothing runs on a laptop today. First task (30 min): make the servo link lazy and add a mock that logs angles. Both arm drivers get a mock that prints commands. `mock_drs.py` runs always. With mocks, the pusher and the station run on one laptop with a webcam and a bottle on the desk.
 
-| CubeBot file | Use | Change needed |
+## Reuse map
+
+| Source | Use | Change needed |
 |---|---|---|
-| `models/arm.py` | 3-DOF leg IK (`set_coord`, offsets `delta_a/b/c`, `invert`) | Add reachability assert (IK currently clamps `acos` silently). Re-measure link lengths `A,B,C` on the hexapod |
-| `models/body.py` | `Body` with `set_rotation/position/move`, leg-count agnostic | Feed it 6 legs. Use for leveling and body sway |
-| `config/robot_setup.py` | Leg geometry, mounts, channel map | New `config_hex.py`: 6 legs, mirrored `local_to_body`, 18 channels, `calib.json` offsets |
-| `devices/servo_uart.py` | Pi->Pico link `"ch;angle\n"` @ 230400 | Import-time serial open -> lazy/mocked. Verify Pico firmware maps 18 channels |
-| `pwm_servo/pwm_servo.cpp` | Pico PWM firmware (per-GPIO channels) | Only if channel count/pins differ. Reflash is about 10 min |
-| `devices/wt901.py` | IMU roll/pitch over I2C `0x50` | Verify sign and zero on a level table (the `-180` offset is suspicious) |
-| `ai/depth_worker.py`, `ai/ai_camera.py` | Hailo `scdepthv3` 320x256 depth + picamera2 lores stream | Repo snapshot has stale imports (`from depth_worker import ...`, `robot_controller` expects `ai_camera.shared_depth_value` that no longer exists). Budget 1-2 h. Recalibrate the depth threshold (`-5.6`) for our camera mount |
-| `ai/hand_tracking.py` | Hailo hand detector (`get_last_hands()`) | Stretch only. Pattern for running any detection HEF |
-| `ai/fast_depth.py` | YOLO decode and drawing code | Lift the detection decode for the ball/COCO HEF |
-| `ai/models/best_ball_v8n.hef` | 1-class ball detector, 224x224, Hailo-8L | Primary detector if the debris are balls |
-| `ai/models/yolov11n*.hef` | COCO detector (cup, bottle, sports ball...) | Second option for household objects |
-| `control/joystick.py` | evdev gamepad | Hardcoded `/dev/input/event5`. Use for teleop plus **E-STOP button** |
-| `pre_settings/servo_zero.py`, `gyro_test.py`, `camera_test.py`, `led_test.py` | Bring-up scripts | Use as-is on day 1 |
-| `points/animation.py` | Quadruped waypoint gait | **Replace** with parametric tripod (`legs/gait.py`) |
-| `RL/**` | ONNX policies for 4 legs | **Do not use** |
-| Everything with `/home/vladimir/...` paths | | Move to a `paths.py`/env var |
+| CubeBot `models/arm.py`, `models/body.py`, `config/robot_setup.py` | Leg IK and geometry | None. It is already this robot |
+| CubeBot `points/animation.py` `walk_points` | Forward walk | Wrap as `walk_fwd(n)`. Backward = same waypoints in reverse order |
+| CubeBot `points/animation.py` `rotate_right_points` | Turn right | Turn left = mirrored (`dYaw` sign flipped). Test on blocks first |
+| CubeBot `robot_controller.py` | Reference for the stand-up + walk loop, LEDs on GPIO 17/27/22 | Lift the loop, drop the hardcoded paths and globals |
+| CubeBot `devices/servo_uart.py` | Pi → Pico `"ch;angle\n"` at 230400 | Lazy open + mock |
+| CubeBot `ai/fast_depth.py`, `ai/ai_camera.py` | picamera2 + Hailo inference and YOLO decode | Swap in the `yolo11n_coco` HEF, keep class `bottle`. Stale imports: budget 1-2 h |
+| CubeBot `control/joystick.py` | Gamepad teleop + E-STOP button | Hardcoded `/dev/input/event5`: find the device by name |
+| CubeBot `RL/walk/models/crawl.onnx` | Backup gait | Only if the waypoint gait can't push |
+| `RoArm-M3/python_demo/` | Serial/HTTP JSON examples | Base for `roarm.py` |
+| `SO-Arm-101/Software/WEBUI_CALIBRATION.md`, LeRobot `so101_follower` | Calibration, bus access | Calibrate once; `so101.py` uses LeRobot's bus class or the Feetech SDK |
+| `zxing-cpp` (pip) | EAN-13 decode, handles rotation and moderate curvature | None. `pyzbar` as a second decoder |
 
-## Hexapod locomotion design (R1)
+## Pusher design (R1 + R2)
 
-- **Gait: alternating tripod.** Group A = {L1, R2, L3}, group B = {R1, L2, R3}. Three feet always on ground, so it is statically stable, so **no RL/balance loop needed**.
-- Foot path in body frame, cycle time `T` (start 1.6 s), duty 50%:
-  - stance: foot slides linearly `+s/2 -> -s/2` at ground height,
-  - swing: `-s/2 -> +s/2` with a half-sine lift `h` (start 25-30% of leg height).
-- Per-leg stride vector for turning: `stride = (vx, vy) + wz x r_leg` using the leg mount position `r_leg` (rotates in place when `vx=vy=0`).
-- Time-based (not step-count-based like `Arm.set_position`), so speed does not depend on loop rate. Update at 30-50 Hz.
-- **Body leveling:** IMU roll/pitch -> PI -> `body.set_rotation(roll, pitch)`, clamped to +-12 deg, 20 Hz. Independent of the gait, so it also works standing (tilted-board demo).
-- **Stow pose for the arm** during walking: compact, low, over the body centre. Only deploy when stopped. Lower centre of gravity matters more than speed.
-- Preview the gait offline first (`tools/gait_preview.py`, matplotlib + IK reachability check) before touching servos.
+- Step-and-look: **one gait cycle, then look again.** Slow, but no timing bugs.
+- APPROACH steering: `err = item.cx - 0.5`. If `|err| > 0.15`, turn one step toward it, else walk one step forward. Stop when the box bottom is in the bumper zone (calibrate with the bottle touching the bumper).
+- PUSH steering: same rule on `dock.cx`. The container may be hidden in the bumper, so don't depend on seeing it.
+- BACK_OFF trigger: `dock.size` above a threshold measured with the bumper at the funnel mouth, then N back steps, then `POST clear`.
+- Lost container during PUSH: back 2 steps, return to SEARCH. Per-state timeouts (APPROACH 45 s, PUSH 45 s). ESTOP checked before every step.
 
-## Perception design (R2)
+## Station design (R3 + R4)
 
-- Camera: picamera2 `lores` 320x256 stream (already working in CubeBot) for depth; a second stream or crop for the detector. Keep autofocus continuous or **lock exposure/focus** for the demo.
-- Detector: `best_ball_v8n.hef` (one class). Fallback in parallel: **HSV blob** on the debris colour, about 30 lines of OpenCV, no Hailo needed, very stable indoors.
-- Pick zone: place debris at the arm's sweet spot, read the detection box, store `pickzone.json` = `{cx, cy, w, tol}`. ALIGN just drives the error to zero.
-- Obstacle: bottom strip of the depth map, split left/centre/right, thresholds measured empirically (log values with a box at 15/30/60 cm).
+- **Teaching:** `teach.py roarm pick` turns torque off, you move the arm by hand, Enter saves the joint angles. Same for the SO-101. Support the arm when torque goes off.
+- **RoArm gripper:** teach `close` on a real bottle: it holds the bottle, but the bottle doesn't dent (a crushed bottle loses its deposit).
+- **SO-101 roll:** `above_pocket` → lower the padded tip onto the top of the bottle → drag about 5 cm sideways along the groove's cross direction → lift → back. Each drag turns a 0.5 L bottle (about 6.5 cm across) roughly a quarter turn. Tune the tip height so it presses lightly: too hard and the bottle skids, too light and it slips.
+- **Scan:** grab 5 frames after each roll, decode each, take the first valid EAN-13 (check digit verified). Lamp at an angle to avoid glare on the shiny label.
+- **Pick sequence:** `home → above_pocket → pick → close → lift → above_bag|above_reject → open → home`. Speed-limited, 0.3 s pause at `pick`.
+- **Missed grasp:** after `lift`, if `dock.py` still sees a bottle in the pocket, retry once, then report failure.
+- **Dock check:** compare the pocket ROI with an empty-pocket reference image (mean abs diff > threshold), plus a second ROI for the arm zone. No detector needed.
+- **Session:** accepted EANs are kept in memory and in `runs/`. The "Voucher" button (dashboard or keyboard) calls `drs.transaction`, then shows the voucher ID as a QR code with the amount.
 
-## Brain design (R4)
+## Power and wiring
 
-- Plain enum + one function per state, 20-30 Hz tick, per-state **timeouts**, single **ESTOP** flag checked first every tick. No framework.
-- Modes on the dashboard: `auto` (full loop), `semi` (operator presses OK before PICK), `teleop` (gamepad only). This is the demo's graceful-degradation ladder.
-- Log every tick to `runs/<timestamp>.jsonl` (state, targets, tilt) so failed runs can be diagnosed in 2 minutes.
-- Status LEDs: solid = ready, blink = moving, all on = ESTOP (reuse GPIO 17/27/22).
-
-## Arm design (R3)
-
-- Driver depends on the partner's stack (SO-100 normally uses Feetech bus servos over a USB serial board; check at hour 0). Wrap whatever works into `arm.go(name)`.
-- **Record & replay:** torque off, move the arm by hand, save joint positions to `poses.json` (`stow`, `ready`, `pick`, `drop`, plus 1-2 intermediate waypoints). Replay with interpolation and speed limit.
-- Hand: `open` and `close` presets. Verify closure (position reached vs blocked) to detect a missed grasp, then retry once.
-
-## Power and wiring (biggest silent killer)
-
-| Rail | Feeds | Note |
+| Item | Supply | Note |
 |---|---|---|
-| 5 V / 5 A clean | Pi 5 + Hailo | Own buck converter; never from servo rail |
-| Servo rail (leg PWM servos) | 18 servos | Peak current can exceed 10 A. Big BEC/battery or bench PSU while developing |
-| Arm rail | SO-100 servos (7.4-12 V typ.) + hand | Separate supply, common ground |
-
-Common ground everywhere. Fuse or inline current-limit. Measure stall current before the first walking test. **Develop on a bench PSU with the robot on blocks**, battery only for final runs.
-
-UART capacity check: 18 servos x 50 Hz x about 9 bytes = about 8 KB/s vs about 23 KB/s at 230400 baud. OK, but keep the update at 30-50 Hz and only send changed channels.
+| CubeBot Pi + Hailo | Own 5 V 5 A buck | Never from the servo rail |
+| CubeBot leg servos | Battery or bench PSU | Bench PSU during development, robot on blocks for new gait code |
+| RoArm-M3 Pro | 12 V 5 A adapter | |
+| SO-101 | Its own adapter (check the kit: 5 V or 12 V STS3215 version) | Wrong voltage burns the servos: check the label before plugging in |
+| Laptop, webcam, lamp | Mains | |
 
 ## Ops
 
-- Dashboard: Flask (or stdlib `http.server`) MJPEG at about 10 FPS, low res. Pi runs its **own WiFi hotspot or Ethernet** so venue WiFi is irrelevant.
-- Deploy: `git pull` on the Pi. Only `main`. Keep a `demo.yaml` (locked thresholds) separate from dev config.
+- Laptop runs a hotspot (or bring a travel router). The Pi joins it. Venue WiFi doesn't matter.
+- Deploy: `git pull` on the Pi. Only `main`. `demo.yaml` holds the locked thresholds, the DRS URL and the station ID.
+- Every state change is logged to `runs/<timestamp>.jsonl` on both machines, including each EAN and decision.
