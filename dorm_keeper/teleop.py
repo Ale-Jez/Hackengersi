@@ -128,13 +128,17 @@ def boost_p(arm):
         arm.ph.write1ByteTxRx(arm.port, sid, 21, 32)
 
 
-def main():
+def main(extra_keys=None, on_start=None):
+    """extra_keys = {"p": funkcja(arm)} - wlasne klawisze; on_start(arm) - akcja na starcie."""
+    extra_keys = extra_keys or {}
     port = sys.argv[1] if len(sys.argv) > 1 else find_port()
     arm = SO101(port)
     limits = servo_limits(arm)
     if BOOST_P:
         boost_p(arm)
     arm.torque(True)
+    if on_start:
+        on_start(arm)
     pad = Gamepad()
     pad_ok = pad.read() is not None
 
@@ -169,6 +173,15 @@ def main():
                 if key in KEYS:
                     joint, sign = KEYS[key]
                     target[joint] += sign * DIRECTION[joint] * speed * KEY_STEP_TIME
+                elif key in extra_keys:
+                    print()
+                    try:
+                        extra_keys[key](arm)
+                    except SO101Error as e:
+                        print("ERROR:", e)
+                    here = arm.joints()
+                    target.update({j: here[j] for j in MOVE_JOINTS})  # chwytak trzyma dalej
+                    sent.update({j: here[j] for j in MOVE_JOINTS})
                 elif key in "123":
                     level = int(key) - 1
                 elif key == "z":
