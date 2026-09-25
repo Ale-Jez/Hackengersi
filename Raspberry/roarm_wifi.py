@@ -7,6 +7,7 @@ T:104 with spd 0 is silently ignored by the firmware, so spd must be > 0.
 
     python roarm_wifi.py where           measured pose (jog the arm with its own web page http://<ip>/)
     python roarm_wifi.py send '{"T":105}'
+    python roarm_wifi.py wiggle          up 40 mm, back, gripper open/close: proves the link works
     MOCK=1 python roarm_wifi.py          self-check without hardware
 """
 import json
@@ -85,6 +86,16 @@ if __name__ == "__main__":
         print(arm.where())
     elif sys.argv[1:2] == ["send"]:
         arm.send(json.loads(sys.argv[2]))
+    elif sys.argv[1:2] == ["wiggle"]:  # first-contact test: small moves around wherever it stands now
+        time.sleep(2.5)
+        p = arm.where()
+        print("at", {k: round(p[k], 2) for k in ("x", "y", "z", "tit", "g")})
+        x, y, z, t, g = p["x"], p["y"], p["z"], p["tit"], p["g"]
+        arm.goto(x, y, z + 40, t, g, spd=0.2)
+        arm.goto(x, y, z, t, g, spd=0.2)
+        arm.gripper(cfg["grip_open"])
+        arm.gripper(g)
+        print("wiggle ok")
     else:
         arm = RoArm("mock", mock=True)
         arm.goto(250, 50, 0, 1.57, 1.57)
