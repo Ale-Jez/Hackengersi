@@ -1,5 +1,0 @@
-opencv-python>=4.7
-numpy
-requests
-pyserial
-feetech-servo-sdk

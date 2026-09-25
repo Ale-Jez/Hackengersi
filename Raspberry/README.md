@@ -16,7 +16,7 @@ pip install -r requirements.txt
 python main.py selftest && python vision.py && MOCK=1 python roarm_wifi.py
 ```
 
-- **Brev:** run an OpenAI-compatible vision model, e.g. `vllm serve Qwen/Qwen2.5-VL-7B-Instruct --port 8000`. Put its URL in `brev_url`. If it needs a token, `export BREV_KEY=...`.
+- **Brev:** on the Brev box run `bash Brev/setup.sh` (installs and serves `Qwen/Qwen2.5-VL-7B-Instruct` on port 8000, prints the URL and token). Put the URL in `brev_url` and `export BREV_KEY=...` on the Pi.
 - **RoArm WiFi:** it starts as an access point at `192.168.4.1`. Either connect the Pi to it, or join the arm to the Pi's network from the arm's web page and set `roarm_ip`.
 - **Camera:** find the index with `v4l2-ctl --list-devices`, then set `camera`.
 
