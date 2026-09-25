@@ -7,6 +7,9 @@
 
 .vscode
 rpi5-setup-guide.html
+.claude
+.agents
+
 
 # User-specific stuff
 .idea/**/workspace.xml
@@ -786,3 +789,22 @@ FodyWeavers.xsd
 
 # End of https://www.toptal.com/developers/gitignore/api/linux,windows,macos,visualstudio,visualstudiocode,jetbrains,python,react
 
+# Created by https://www.toptal.com/developers/gitignore/api/archlinuxpackages
+# Edit at https://www.toptal.com/developers/gitignore?templates=archlinuxpackages
+
+### ArchLinuxPackages ###
+*.tar
+*.tar.*
+*.jar
+*.exe
+*.msi
+*.zip
+*.tgz
+*.log
+*.log.*
+*.sig
+
+pkg/
+src/
+
+# End of https://www.toptal.com/developers/gitignore/api/archlinuxpackages
