@@ -56,8 +56,9 @@ class XboxTeleop:
         print(HELP)
 
     def update_sticks(self):
-        """Read all analog sticks once (called before each move)."""
+        """Read analog sticks once (called before each move)."""
         try:
+            events_processed = 0
             for event in get_gamepad():
                 # Analog stick/trigger events
                 if event.ev_type == "Absolute":
@@ -66,10 +67,14 @@ class XboxTeleop:
                     # Apply deadzone
                     if abs(val) < 0.1:
                         val = 0.0
-                    self.sticks[event.ev_code] = val
+                    self.sticks[event.code] = val
+                    events_processed += 1
                 # Button events
                 elif event.ev_type == "Key":
-                    self.handle_button(event.ev_code, event.state)
+                    self.handle_button(event.code, event.state)
+                # Don't process more than 10 events per frame to avoid buffering
+                if events_processed > 10:
+                    break
         except StopIteration:
             pass
 
