@@ -35,7 +35,7 @@ class RoArm:
         self.ser.port = port
         self.ser.open()
         threading.Thread(target=self._read, daemon=True).start()
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + 25  # covers a ~20 s boot after a reset or brown-out
         while not self._seen:
             if time.monotonic() > deadline:
                 raise TimeoutError(
@@ -119,10 +119,13 @@ class RoArm:
         self._send({"T": 210, "cmd": int(on)})
 
     def stop(self):
-        """Emergency stop (T:0). resume() clears it."""
-        self._send({"T": 0})
+        """Halt where it is: command the measured pose as the new goal. Deliberately NOT T:0,
+        which on this arm freezes the firmware (no feedback, no commands) for ~10 s and appears to
+        release torque (the arm can drop). Raises if feedback is stale."""
+        self.move({}, wait=False)
 
     def resume(self):
+        """Clears the firmware's stop flag, only needed if T:0 was sent by hand."""
         self._send({"T": 999})
 
     def close(self):
