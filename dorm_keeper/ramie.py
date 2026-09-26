@@ -18,6 +18,8 @@ Klawisze (kliknij w okno kamery):
 Pad Xbox: lewa galka lewo/prawo + gora/dol, prawa dalej/blizej + obrot, LB/RB pochylenie,
   A chwyc, B pusc, X stop, Y ogladaj puszke, BACK koniec.
 Sygnal od RoArma: http://<IP-laptopa>:8765/skanuj  (odpowiedz JSON z kodem)
+Inspekcja butelki (automat): SZUKAM -> CENTRUJE -> CZYTAM -> WYNIK. Wynik: http://<IP>:8765/wynik
+  (JSON: wynik KAUCYJNA/BEZ_KAUCJI/BRAK_KODU, "obroc_butelke": true/false). Po obrocie: /obrocono
 Awaryjnie: wyjmij wtyczke zasilacza serw.
 
 Katy w stopniach od srodka zakresu enkodera: (ticks - 2048) * 360 / 4096.
@@ -312,6 +314,16 @@ AUTO_RUCHY = [                   # rozgladanie wokol pozycji startowej, gdy brak
 ]
 PAUZA = 0.8                      # ile s patrzy w kazdej pozycji
 PREDKOSC_SKANU = 25              # st./s
+# --- inspekcja butelki: SZUKAM -> CENTRUJE -> CZYTAM -> WYNIK ---
+ROZGLADANIE = False              # False = kamera czeka w pozycji wyczekiwania (butelke przynosi drugie ramie)
+POWROT_PO = 3.0                  # s bez butelki -> kamera wraca spokojnie do pozycji wyczekiwania
+SZUKAJ_PO = 2.0                  # s bez butelki -> kamera zaczyna sie rozgladac (tylko gdy ROZGLADANIE = True)
+SZUKAJ_ZAKRES_POZIOM = 30.0      # st.: rozgladanie w lewo/prawo od pozycji startowej
+SZUKAJ_ZAKRES_PION = 15.0        # st.: rozgladanie w gore/dol od pozycji startowej
+SZUKAJ_PREDKOSC = 12.0           # st./s: jak szybko sie rozglada (wolno = kamera widzi ostro)
+WYCENTROWANY_CZAS = 0.3          # s spokojnie na srodku -> zaczyna czytac kod
+KOD_CZAS = 4.0                   # s czytania kodu -> jak nic, to "BRAK KODU - obroc butelke"
+DECYZJA_URL = ""                 # np. "http://192.168.1.30:8000/decyzja" - wynik wysylany tam automatycznie (POST JSON)
 PORT_HTTP = 8765                 # sygnal od RoArma: http://<IP>:8765/skanuj
 POZA_DOMOWA = "spoczynek"
 PLIK_POZ = "poses_so101.json"
@@ -321,36 +333,53 @@ PLIK_KAUCJI = "kaucja.json"      # wlasna lista EAN z kaucja (oprocz api.kaucja.
 SLEDZ = True                     # startuje wlaczone
 # PLYNNE sledzenie: predkosc ramienia proporcjonalna do odleglosci celu od srodka obrazu.
 SLEDZ_PLYNNIE = True             # False = stary tryb "popraw i poczekaj" (ruch - pauza - ruch)
-SLEDZ_PETLA = 1.2                # szybkosc reakcji (1/s): wiecej = szybciej dogania, za duzo = przestrzeliwuje
-SLEDZ_MAX_V = 25.0               # st./s: najszybszy ruch przy sledzeniu
+SLEDZ_PETLA = 2.2                # szybkosc reakcji (1/s): wiecej = szybciej dogania, za duzo = przestrzeliwuje
+SLEDZ_MAX_V = 40.0               # st./s: najszybszy ruch przy sledzeniu
 SLEDZ_FILTR = 0.4                # wygladzanie pozycji celu (0..1, mniej = gladziej, ale wolniej reaguje)
+CZULOSC_MIN = 0.06               # czulosc nie spadnie ponizej (za mala = za mocna reakcja = machanie)
+SLEDZ_UCZ_CZULOSC = True         # mierz na biezaco, o ile przesuwa sie obraz na 1 st. ruchu (zalezy od odleglosci)
+SLEDZ_START_PLYNNIE = 0.10       # stojace ramie rusza, gdy cel odjedzie dalej niz to (drgania wykrycia = bez ruchu)
 SLEDZ_HAMOWANIE = 0.25           # s: jak szybko wyhamowuje po chwilowej utracie celu
-SLEDZ_FF = 0.8                   # przewidywanie: jedz z predkoscia butelki (0 = wylaczone, 1 = pelne)
+SLEDZ_FF = 0.5                   # przewidywanie: jedz z predkoscia butelki (0 = wylaczone, 1 = pelne)
 SLEDZ_OPOZNIENIE = 0.3           # s: opoznienie kamery (obraz pokazuje ramie sprzed tylu sekund)
 SLEDZ_FF_PROG = 1.0              # st./s: wolniejszy ruch butelki = szum, ignoruj
 SLEDZ_FF_GLADKOSC = 0.3          # 0..1: jak szybko przewidywanie reaguje na zmiane ruchu butelki
 # Tryb "popraw i poczekaj" (SLEDZ_PLYNNIE = False): jeden ruch w strone celu, pauza, nowa klatka, kolejny ruch.
 SLEDZ_KROK = 0.5                 # jaka czesc odleglosci do srodka pokonuje jednym ruchem (0.3 spokojnie, 0.8 szybko)
-SLEDZ_CZULOSC_POZIOM = 0.18      # start: o ile przesuwa sie kod na 1 st. podstawy (potem program sam sie uczy)
-SLEDZ_CZULOSC_PION = 0.18        # start: to samo dla nadgarstka
+SLEDZ_CZULOSC_POZIOM = 0.12      # start: o ile przesuwa sie kod na 1 st. podstawy (potem program sam sie uczy)
+SLEDZ_CZULOSC_PION = 0.12        # start: to samo dla nadgarstka
 SLEDZ_CEL = 0.04                 # tak blisko srodka = wycentrowany, ramie staje
 SLEDZ_START = 0.16               # wycentrowany rusza sie dopiero, gdy kod ucieknie dalej niz to (bez drgan)
 SLEDZ_MIN_KROK = 0.5             # mniejszych ruchow nie robi (st.)
 SLEDZ_MAX_KROK = 8.0             # najwiekszy pojedynczy ruch (st.)
 SLEDZ_PAUZA = 0.7                # s po ruchu, zanim spojrzy znowu (opoznienie kamery + ramie przestaje sie bujac)
 SLEDZ_PREDKOSC = 15              # st./s ruchow sledzenia - wolno = kamera sie nie buja
-SLEDZ_ACC = 8                    # przyspieszenie ruchow sledzenia (mniej = lagodniejszy start i hamowanie)
+SLEDZ_ACC = 15                   # przyspieszenie ruchow sledzenia (mniej = lagodniejszy start i hamowanie)
+SLEDZ_WYPRZEDZENIE = 0.3         # s: serwo dostaje cel tak daleko przed soba -> jedzie ciagle, nie staje co klatke
+SLEDZ_CEL_W_KOD = False          # True = po odczycie celuj w sam kod (nizej; gora butelki moze wyjsc z kadru)
+SLEDZ_CEL_WYSOKOSC = 0.45        # gdzie celowac w butelke: 0 = gora, 0.5 = srodek, 1 = dno (etykieta z kaucja)
+SLEDZ_ASPEKT = {"butelka": 2.8, "puszka": 1.8}  # wysokosc/szerokosc - do szacowania ucietej butelki
+UCIETA_MAX = 1.3                 # ucieta butelka: zgadywana wielkosc najwyzej tyle razy widoczna czesc
+UCIETA_MAX_V = 12.0              # st./s: gdy butelka wystaje poza kadr, cel to tylko szacunek - jedz ostrozniej
 SLEDZ_PROBKI = 3                 # z ilu klatek mediana pozycji kodu
-# Wykrywanie butelek siecia neuronowa (SSD MobileNet v2, COCO) - pewniejsze niz maly kod kreskowy
-SLEDZ_KLASY = {44: "butelka", 47: "puszka"}  # klasy COCO: 44 butelka, 47 kubek (tak widzi puszki)
-BUTELKA_PROG = 0.45              # minimalna pewnosc wykrycia (0..1)
+# Wykrywanie butelek siecia neuronowa. YOLO11n (onnxruntime) widzi tez butelke czesciowo poza kadrem;
+# SSD MobileNet v2 (samo OpenCV) - zapas, gdy nie ma onnxruntime.
+DETEKTOR = "yolo"                # "yolo" albo "ssd"
+YOLO_ROZMIARY = (320, 640)       # YOLO w dwoch skalach: 320 widzi bliskie butelki, 640 dalsze
+YOLO_PRZEPLOT = True             # co klatke inna skala (wyniki drugiej z poprzedniej klatki) = 2x szybciej
+YOLO_KLASY = {39: "butelka", 41: "puszka"}   # klasy COCO w YOLO: 39 butelka, 41 kubek (tak widzi puszki)
+SLEDZ_KLASY = {44: "butelka", 47: "puszka"}  # to samo w numeracji SSD: 44 butelka, 47 kubek
+BUTELKA_PROG = 0.25              # pewnosc (0..1), zeby ZLAPAC nowa butelke
+PUSZKA_PROG = 0.50               # to samo dla "puszki" - wyzej, bo siec tak nazywa tez kubki
+BUTELKA_PROG_TRZYMAJ = 0.15      # pewnosc, zeby TRZYMAC juz sledzona (chwilowy spadek pewnosci nie gubi celu)
 MIN_BUTELKA = 0.12               # butelka nizsza niz 12% wysokosci obrazu = za daleko -> puszcza
 SLEDZ_POTWIERDZ = 3              # w ilu kolejnych klatkach musi byc widac butelke, zeby ja zlapac/przelaczyc
 SLEDZ_TYLKO_KAUCJA = False       # True = sledz tylko butelki z odczytanym kodem kaucyjnym
+CZYTNIK_NA_SEKUNDE = 5           # ile razy na sekunde czytac kod (wiecej = szybciej, ale obciaza procesor)
 KOD_BRAK_PO = 3.0                # s bez odczytu kodu sledzonej butelki -> "obroc butelke kodem do kamery"
 SLEDZ_SZUKAJ_PO = 0.5            # s: szukaj dopiero po tylu sekundach bez kodu (pojedyncze zgubione klatki ignoruj)
 SLEDZ_SZUKAJ_CZAS = 1.5          # s: po utracie kodu jedzie dalej w strone, w ktora kod uciekal
-SLEDZ_SZUKAJ_MAX = 15.0          # st.: najdalej tyle "na slepo" po utracie kodu
+SLEDZ_SZUKAJ_MAX = 8.0          # st.: najdalej tyle "na slepo" po utracie kodu
 SERWO_ACC = 20                   # przyspieszenie serw (mniej = lagodniej; bylo 50)
 SERWO_MARTWA_STREFA = 1          # kroki enkodera (1 = fabrycznie); wiecej = wolne ruchy ida skokami
 SLEDZ_LOG = "sledzenie.log"      # zapis przebiegu (do diagnozy); "" = bez zapisu
@@ -509,7 +538,7 @@ class Sterownik:
                 arm.ph.write1ByteTxRx(arm.port, sid, 26, SERWO_MARTWA_STREFA)
                 arm.ph.write1ByteTxRx(arm.port, sid, 27, SERWO_MARTWA_STREFA)
         self.wolne = set()  # stawy, ktore sledzenie chce ruszyc wolno i lagodnie
-        self.v_sled = {}    # predkosc serwa (st./s) dla ruchow sledzenia - plynna jazda zamiast skokow
+        self.w_sled = {}    # predkosc sledzenia (st./s, ze znakiem) - serwo jedzie ciagle zamiast skokami
         arm.torque(True)
         self.pad = Gamepad()
         self.pad_ok = self.pad.read() is not None
@@ -651,18 +680,28 @@ class Sterownik:
 
         spd = int(max(v, CLAMP_SPEED) * 2 * TICKS_PER_DEG)
         for j in self.arm.JOINTS:
-            prog = 0.05 if j in self.wolne else 0.2  # sledzenie: drobne ciagle kroki = plynny ruch
+            if j in self.w_sled:
+                # plynne sledzenie: cel wysuniety o SLEDZ_WYPRZEDZENIE sekund ruchu do przodu, predkosc = predkosc
+                # sledzenia -> serwo jedzie ciagle i nie zdazy zahamowac przed kolejna klatka
+                w = self.w_sled[j]
+                lo, hi = self.limits[j]
+                cel = min(max(self.target[j] + w * SLEDZ_WYPRZEDZENIE, lo), hi)
+                self.arm.acc = SLEDZ_ACC
+                self.arm._write_goal(self.arm.ids[j], _to_ticks(cel), max(1, int(max(abs(w), 3.0) * TICKS_PER_DEG)))
+                self.arm.acc = SERWO_ACC
+                self.sent[j] = self.target[j]
+                continue
+            prog = 0.05 if j in self.wolne else 0.2  # sledzenie krokowe: drobne kroki
             if abs(self.target[j] - self.sent.get(j, 1e9)) > prog:
-                if j in self.wolne:  # ruch sledzenia: lagodnie, z predkoscia dopasowana do ruchu
+                if j in self.wolne:  # ruch sledzenia krokowego: lagodnie
                     self.arm.acc = SLEDZ_ACC
-                    v_serwa = self.v_sled.get(j, SLEDZ_PREDKOSC)
-                    self.arm._write_goal(self.arm.ids[j], _to_ticks(self.target[j]), max(1, int(v_serwa * TICKS_PER_DEG)))
+                    self.arm._write_goal(self.arm.ids[j], _to_ticks(self.target[j]), max(1, int(SLEDZ_PREDKOSC * TICKS_PER_DEG)))
                     self.arm.acc = SERWO_ACC
                 else:
                     self.arm._write_goal(self.arm.ids[j], _to_ticks(self.target[j]), spd)
                 self.sent[j] = self.target[j]
         self.wolne.clear()
-        self.v_sled.clear()
+        self.w_sled.clear()
         return pressed
 
     def opis(self):
@@ -935,8 +974,15 @@ def serwer_http(arm):
                 self._json(stan["wynik"] or {"blad": "timeout"})
             elif self.path.startswith("/status"):
                 self._json(stan)
+            elif self.path.startswith("/wynik"):  # wynik inspekcji butelki (kaucja / bez / obroc)
+                self._json(dict(stan.get("inspekcja") or {"stan": "brak inspekcji"},
+                                ostatni_wynik=stan.get("ostatni_wynik")))
+            elif self.path.startswith("/obrocono"):  # butelka obrocona - czytaj kod od nowa
+                if _inspekcja:
+                    _inspekcja.po_obrocie()
+                self._json({"ok": True})
             else:
-                self._json({"blad": "uzyj /skanuj albo /status"}, 404)
+                self._json({"blad": "uzyj /skanuj, /status, /wynik albo /obrocono"}, 404)
 
         do_POST = do_GET
 
@@ -1057,12 +1103,18 @@ class CzytnikKodow:
         self.kody = []         # ostatnie kody z calego obrazu
         self.kod_celu = {}     # id sledzonej butelki -> odczytany EAN
         self._stop = False
+        self.pauza = False     # True = nic nie czytaj (wynik juz rozstrzygniety)
+        self._ost = 0.0
         threading.Thread(target=self._petla, daemon=True).start()
 
     def podaj(self, klatka, cel_id=None, box=None):
         with self._lock:
             self._klatka = klatka
             self._cel = (cel_id, box) if cel_id and box else None
+
+    def potrzebna_klatka(self):
+        """Czy czytnik czeka na nowa klatke (kopiujemy ja tylko wtedy - oszczednosc czasu petli)."""
+        return self._klatka is None and not self.pauza and time.time() - self._ost >= 1.0 / CZYTNIK_NA_SEKUNDE
 
     def zatrzymaj(self):
         self._stop = True
@@ -1077,29 +1129,29 @@ class CzytnikKodow:
             if klatka is None:
                 time.sleep(0.01)
                 continue
+            self._ost = time.time()
             try:
-                self.kody = znajdz_kody(klatka)
-                if not cel:
+                if not cel:  # bez celu: caly obraz (np. objazd puszki pod ENTER)
+                    self.kody = znajdz_kody(klatka)
                     continue
+                self.kody = []
                 cid, (x0, y0, x1, y1) = cel
-                # kod widoczny juz w calym obrazie, w obrebie butelki
-                ean = next((k["ean"] for k in self.kody if k["ean"] and x0 <= k["cx"] <= x1 and y0 <= k["cy"] <= y1),
-                           None)
-                if ean is None:  # wycinek butelki, powiekszony - maly kod latwiej odczytac
+                ean = None
+                if ean is None:  # sam wycinek butelki (powiekszony, gdy maly) - duzo szybciej niz caly obraz 1080p
                     h, w = klatka.shape[:2]
                     mx, my = (x1 - x0) * 0.15, (y1 - y0) * 0.15
                     wyc = klatka[max(0, int(y0 - my)):min(h, int(y1 + my)), max(0, int(x0 - mx)):min(w, int(x1 + mx))]
                     if wyc.size:
                         if max(wyc.shape[:2]) < 700:
                             wyc = cv2.resize(wyc, None, fx=2.0, fy=2.0, interpolation=cv2.INTER_CUBIC)
-                        ean = next((k["ean"] for k in znajdz_kody(wyc) if k["ean"]), None)
-                if ean is None:  # przekrzywiony kod: wyprostuj wykryty prostokat i czytaj mocniej
-                    gray = cv2.cvtColor(klatka, cv2.COLOR_BGR2GRAY)
-                    for k in self.kody:
-                        if k["ean"] is None and x0 <= k["cx"] <= x1 and y0 <= k["cy"] <= y1:
-                            ean = czytaj_przekrzywiony(gray, k["rogi"].reshape(-1, 2))
-                            if ean:
-                                break
+                        kody_wyc = znajdz_kody(wyc)
+                        ean = next((k["ean"] for k in kody_wyc if k["ean"]), None)
+                        if ean is None:  # przekrzywiony kod w wycinku: wyprostuj i czytaj mocniej
+                            gray = cv2.cvtColor(wyc, cv2.COLOR_BGR2GRAY)
+                            for k in kody_wyc:
+                                ean = czytaj_przekrzywiony(gray, k["rogi"].reshape(-1, 2))
+                                if ean:
+                                    break
                 if ean:
                     self.kod_celu[cid] = ean
             except Exception as e:  # czytnik nie moze wywalic calego programu
@@ -1140,10 +1192,28 @@ class Kaucje:
         print(f"\n{ean}: {'KAUCJA' if self.status[ean] else 'bez kaucji'} {self.nazwy.get(ean, '')}")
 
 
+_kolejka_logu = None
+
+
+def _pisz_log(kolejka):
+    with open(os.path.join(_katalog, SLEDZ_LOG), "a", encoding="utf-8") as f:
+        while True:
+            f.write(kolejka.get())
+            if kolejka.empty():
+                f.flush()
+
+
 def _log(tekst):
-    if SLEDZ_LOG:
-        with open(os.path.join(_katalog, SLEDZ_LOG), "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%H:%M:%S')} {tekst}\n")
+    """Zapis do logu w tle (otwieranie pliku przy kazdym wpisie trwalo ~200 ms i zacinalo program)."""
+    global _kolejka_logu
+    if not SLEDZ_LOG:
+        return
+    if _kolejka_logu is None:
+        import queue
+
+        _kolejka_logu = queue.Queue()
+        threading.Thread(target=_pisz_log, args=(_kolejka_logu,), daemon=True).start()
+    _kolejka_logu.put(f"{time.strftime('%H:%M:%S')} {tekst}\n")
 
 
 class Sledzenie:
@@ -1256,6 +1326,9 @@ class Sledzenie:
         self._poprz = None
         self._hist = []            # (czas, blad_x, blad_y) - do przewidywania ruchu kodu
         self._filtr = None         # wygladzony blad (x, y) - tryb plynny
+        self.kod_wzgl = None       # gdzie na butelce jest kod (wzgledem ramki) - tam celujemy
+        self._jedzie = {"x": False, "y": False}  # histereza trybu plynnego
+        self._uciete = {"gora": False, "dol": False, "lewa": False, "prawa": False}
         self._w = {"x": 0.0, "y": 0.0}  # biezaca predkosc stawow (st./s) - tryb plynny
         self._t_ost = None
         self._szukano = 0.0        # ile st. przejechal "na slepo" od utraty kodu
@@ -1272,11 +1345,15 @@ class Sledzenie:
         for o, staw in stawy.items():
             w = self._w[o]
             if abs(w) < 0.05:
+                if abs(getattr(self, "_w_poprz", {}).get(o, 0.0)) >= 0.05:
+                    st.wolne.add(staw)
+                    st.w_sled[staw] = 0.0  # wlasnie stanal: wyslij cel bez wyprzedzenia
                 continue
             st.target[staw] += w * dt
             st.wolne.add(staw)
-            st.v_sled[staw] = max(abs(w) * 1.5, 4.0)
+            st.w_sled[staw] = w
             ruch = max(ruch, abs(w * dt))
+        self._w_poprz = dict(self._w)
         return ruch
 
     def _steruj_plynnie(self, st, msg, teraz):
@@ -1301,19 +1378,65 @@ class Sledzenie:
         self._poprz_f = self._filtr
         for i, o in enumerate(("x", "y")):
             e = self._filtr[i]
-            nadmiar = max(0.0, abs(e) - SLEDZ_CEL) / (1.0 - SLEDZ_CEL)  # od 0 na brzegu strefy celu
+            rusza_sie = abs(self._ff[o]) > SLEDZ_FF_PROG  # butelka naprawde jedzie
+            # histereza: stojace ramie rusza dopiero przy wyraznym odjechaniu, jadace dojezdza do samego srodka
+            prog = SLEDZ_CEL if (self._jedzie[o] or rusza_sie) else SLEDZ_START_PLYNNIE
+            nadmiar = max(0.0, abs(e) - SLEDZ_CEL) / (1.0 - SLEDZ_CEL) if abs(e) > prog else 0.0
             w = -math.copysign(nadmiar, e) * SLEDZ_PETLA / self.g[o]
-            if abs(self._ff[o]) > SLEDZ_FF_PROG:  # butelka sie rusza -> jedz razem z nia
+            if rusza_sie:  # butelka sie rusza -> jedz razem z nia
                 w += SLEDZ_FF * self._ff[o]
-            self._w[o] = max(-SLEDZ_MAX_V, min(SLEDZ_MAX_V, w))
+            self._jedzie[o] = abs(w) > 0.05
+            uc = getattr(self, "_uciete", {})
+            ucieta = (uc.get("gora") or uc.get("dol")) if o == "y" else (uc.get("lewa") or uc.get("prawa"))
+            v_max = UCIETA_MAX_V if ucieta else SLEDZ_MAX_V  # cel to tylko szacunek -> ostrozniej
+            self._w[o] = max(-v_max, min(v_max, w))
         self._hist_w = [h for h in self._hist_w if teraz - h[0] < 1.0] + [(teraz, dict(self._w))]
+        if SLEDZ_UCZ_CZULOSC:
+            self._ucz_czulosc(st, teraz)
         self._jedz(st, dt)
         if teraz - getattr(self, "_log_t", 0.0) > 0.3:
             self._log_t = teraz
             _log(f"cel={self.cel} x={self._filtr[0]:+.2f} y={self._filtr[1]:+.2f} {getattr(self, 'zrodlo', '?')} "
                  f"pan={st.here['pan']:.1f} wflex={st.here['wflex']:.1f} "
-                 f"predkosc pan={self._w['x']:+.1f} wflex={self._w['y']:+.1f} st/s")
+                 f"predkosc pan={self._w['x']:+.1f} wflex={self._w['y']:+.1f} st/s "
+                 f"czulosc x={self.g['x']:+.3f} y={self.g['y']:+.3f}")
         return msg
+
+    def _ucz_czulosc(self, st, teraz):
+        """Czulosc = zmiana polozenia celu w obrazie / ruch stawu, ktory ja spowodowal (kamera widzi go z opoznieniem).
+
+        Zalezy od odleglosci butelki (blisko = maly ruch, duze przesuniecie obrazu), wiec uczymy sie jej na biezaco.
+        Pomiary, ktore nie pasuja (np. butelka sama sie ruszyla), odrzucamy.
+        """
+        stawy = {"x": SLEDZ_STAW_POZIOM, "y": SLEDZ_STAW_PION}
+        h = getattr(self, "_hist_g", [])
+        uc = getattr(self, "_uciete", {})
+        ucieta = {"x": bool(uc.get("lewa") or uc.get("prawa")), "y": bool(uc.get("gora") or uc.get("dol"))}
+        h = [x for x in h if teraz - x[0] < 2.0] + [(teraz, self._filtr, {o: st.here[j] for o, j in stawy.items()},
+                                                     ucieta)]
+        self._hist_g = h
+        if teraz - getattr(self, "_g_t", 0.0) < 0.2:
+            return
+        self._g_t = teraz
+
+        def wpis(t):
+            return next((x for x in reversed(h) if x[0] <= t), None)
+
+        okno, opozn = 0.4, SLEDZ_OPOZNIENIE
+        teraz_e, stary_e = h[-1], wpis(teraz - okno)
+        teraz_k, stary_k = wpis(teraz - opozn), wpis(teraz - okno - opozn)
+        if not (stary_e and teraz_k and stary_k):
+            return
+        for i, o in enumerate(("x", "y")):
+            if any(x[3][o] for x in h if teraz - x[0] <= okno + opozn):
+                continue  # w oknie pomiaru butelka byla ucieta - nie ucz sie z tego
+            dth = teraz_k[2][o] - stary_k[2][o]
+            if abs(dth) < 0.8:
+                continue
+            g_obs = (teraz_e[1][i] - stary_e[1][i]) / dth
+            if g_obs * self.g[o] > 0 and 0.25 <= g_obs / self.g[o] <= 4.0:
+                g = self.g[o] + 0.3 * (g_obs - self.g[o])
+                self.g[o] = math.copysign(min(max(abs(g), CZULOSC_MIN), 0.6), g)
 
     def _szukaj_plynnie(self, st, teraz):
         """Cel chwilowo niewidoczny: jesli uciekal - jedz dalej za nim, inaczej plynnie wyhamuj."""
@@ -1582,37 +1705,312 @@ def pobierz_model():
     return pb, pbtxt
 
 
+YOLO_URL = "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.onnx"
+
+
+def pobierz_yolo():
+    import urllib.request
+
+    sciezka = os.path.join(_katalog, "modele", "yolo11n.onnx")
+    if not os.path.exists(sciezka):
+        os.makedirs(os.path.dirname(sciezka), exist_ok=True)
+        print("Pobieram model YOLO11n (jednorazowo, 11 MB)...")
+        urllib.request.urlretrieve(YOLO_URL, sciezka)
+    return sciezka
+
+
 class DetektorButelek:
-    """Butelki (i puszki) w klatce: [{"cx","cy","w","h","pewnosc","klasa","box"}] w pikselach."""
+    """Butelki (i puszki) w klatce: [{"cx","cy","w","h","pewnosc","klasa","box"}] w pikselach.
+
+    Domyslnie YOLO11n przez onnxruntime; gdy go brak albo sie nie uda - SSD MobileNet przez OpenCV.
+    """
 
     def __init__(self):
-        import cv2
+        self.yolo = None
+        if DETEKTOR == "yolo":
+            try:
+                import onnxruntime as ort
 
-        try:
-            pb, pbtxt = pobierz_model()
-        except Exception as e:
-            raise SO101Error(f"nie moge pobrac modelu butelek ({e}) - sprawdz internet") from e
-        self.net = cv2.dnn.readNetFromTensorflow(pb, pbtxt)
+                opcje = ort.SessionOptions()
+                opcje.intra_op_num_threads = max(1, min(4, (os.cpu_count() or 4) // 2))
+                self.yolo = ort.InferenceSession(pobierz_yolo(), opcje, providers=["CPUExecutionProvider"])
+                self.wejscie = self.yolo.get_inputs()[0].name
+                print("Wykrywanie butelek: YOLO11n")
+            except Exception as e:
+                print(f"YOLO niedostepne ({e}) - uzywam SSD. Doinstaluj: pip install onnxruntime")
+        if self.yolo is None:
+            import cv2
+
+            try:
+                pb, pbtxt = pobierz_model()
+            except Exception as e:
+                raise SO101Error(f"nie moge pobrac modelu butelek ({e}) - sprawdz internet") from e
+            self.net = cv2.dnn.readNetFromTensorflow(pb, pbtxt)
+            print("Wykrywanie butelek: SSD MobileNet")
+
+    @staticmethod
+    def _wpis(x0, y0, x1, y1, pewnosc, klasa, w, h):
+        x0, y0, x1, y1 = max(0.0, x0), max(0.0, y0), min(float(w), x1), min(float(h), y1)
+        if x1 - x0 < 4 or y1 - y0 < 4:
+            return None
+        return {"cx": (x0 + x1) / 2, "cy": (y0 + y1) / 2, "w": x1 - x0, "h": y1 - y0,
+                "pewnosc": float(pewnosc), "klasa": klasa, "box": (int(x0), int(y0), int(x1), int(y1)), "ean": None}
+
+    def _wykryj_yolo(self, klatka):
+        """YOLO w kilku skalach (bliska butelka lepiej wychodzi w malej, daleka w duzej) + wspolne NMS."""
+        import cv2
+        import numpy as np
+
+        h, w = klatka.shape[:2]
+        prog = min(BUTELKA_PROG, BUTELKA_PROG_TRZYMAJ)
+        ramki, oceny, klasy = [], [], []
+        if YOLO_PRZEPLOT and len(YOLO_ROZMIARY) > 1:
+            # w tej klatce jedna skala, pozostale z pamieci (z poprzednich klatek - przesuniecie znikome)
+            self._nr = (getattr(self, "_nr", -1) + 1) % len(YOLO_ROZMIARY)
+            skale = [YOLO_ROZMIARY[self._nr]]
+            if not hasattr(self, "_pamiec"):
+                self._pamiec = {}
+            for rozm, (r_, o_, k_) in self._pamiec.items():
+                if rozm != skale[0]:
+                    ramki += r_
+                    oceny += o_
+                    klasy += k_
+        else:
+            skale = YOLO_ROZMIARY
+        for rozm in skale:
+            nowe_r, nowe_o, nowe_k = [], [], []
+            s = rozm / max(h, w)
+            img = cv2.resize(klatka, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+            ph, pw = (img.shape[0] + 31) // 32 * 32, (img.shape[1] + 31) // 32 * 32  # wielokrotnosci 32
+            pad = np.full((ph, pw, 3), 114, np.uint8)
+            pad[:img.shape[0], :img.shape[1]] = img
+            x = cv2.cvtColor(pad, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+            out = self.yolo.run(None, {self.wejscie: x})[0][0].T  # N x (4 + 80 klas)
+            for nr, nazwa in YOLO_KLASY.items():
+                sc = out[:, 4 + nr]
+                for i in np.where(sc >= prog)[0]:
+                    cx, cy, bw, bh = (float(v) / s for v in out[i, :4])
+                    nowe_r.append([int(cx - bw / 2), int(cy - bh / 2), int(bw), int(bh)])
+                    nowe_o.append(float(sc[i]))
+                    nowe_k.append(nazwa)
+            ramki += nowe_r
+            oceny += nowe_o
+            klasy += nowe_k
+            if YOLO_PRZEPLOT:
+                self._pamiec[rozm] = (nowe_r, nowe_o, nowe_k)
+        wyniki = []
+        if ramki:
+            for i in np.array(cv2.dnn.NMSBoxes(ramki, oceny, prog, 0.5)).flatten():
+                bx, by, bw, bh = ramki[i]
+                wpis = self._wpis(bx, by, bx + bw, by + bh, oceny[i], klasy[i], w, h)
+                if wpis:
+                    wyniki.append(wpis)
+        return wyniki
 
     def wykryj(self, klatka):
         import cv2
 
+        if self.yolo is not None:
+            return self._wykryj_yolo(klatka)
         h, w = klatka.shape[:2]
         self.net.setInput(cv2.dnn.blobFromImage(klatka, size=(300, 300), swapRB=True))
         wyniki = []
         for d in self.net.forward()[0, 0]:
             klasa, pewnosc = int(d[1]), float(d[2])
-            if klasa not in SLEDZ_KLASY or pewnosc < BUTELKA_PROG:
+            if klasa not in SLEDZ_KLASY or pewnosc < min(BUTELKA_PROG, BUTELKA_PROG_TRZYMAJ):
                 continue
             # float(): zwykle liczby zamiast numpy.float32 (inaczej zapis historii do JSON sie wywala)
-            x0, y0 = max(0.0, float(d[3])) * w, max(0.0, float(d[4])) * h
-            x1, y1 = min(1.0, float(d[5])) * w, min(1.0, float(d[6])) * h
-            if x1 - x0 < 4 or y1 - y0 < 4:
-                continue
-            wyniki.append({"cx": (x0 + x1) / 2, "cy": (y0 + y1) / 2, "w": x1 - x0, "h": y1 - y0,
-                           "pewnosc": pewnosc, "klasa": SLEDZ_KLASY[klasa],
-                           "box": (int(x0), int(y0), int(x1), int(y1)), "ean": None})
+            wpis = self._wpis(float(d[3]) * w, float(d[4]) * h, float(d[5]) * w, float(d[6]) * h, pewnosc,
+                              SLEDZ_KLASY[klasa], w, h)
+            if wpis:
+                wyniki.append(wpis)
         return wyniki
+
+
+def pelna_ramka(bt, uciete):
+    """Szacowana cala butelka, gdy czesc wystaje poza kadr (uciete = {"gora","dol","lewa","prawa"}: bool).
+
+    Bez tego srodek ucietej ramki "ucieka" w strone krawedzi i ramie zjezdza na dno albo szyjke butelki.
+    """
+    x0, y0, x1, y1 = bt["box"]
+    w, h = max(x1 - x0, 1), max(y1 - y0, 1)
+    aspekt = SLEDZ_ASPEKT.get(bt["klasa"], 2.5)
+    if w > h * 1.2:  # butelka lezy - dluzszy bok w poziomie
+        dl = min(max(w, h * aspekt), w * UCIETA_MAX)
+        if uciete["lewa"] and not uciete["prawa"]:
+            x0 = x1 - dl
+        elif uciete["prawa"] and not uciete["lewa"]:
+            x1 = x0 + dl
+        return x0, y0, x1, y1
+    wys_pr = min(max(h, w * aspekt), h * UCIETA_MAX)
+    if uciete["gora"] and not uciete["dol"]:
+        y0 = y1 - wys_pr
+    elif uciete["dol"] and not uciete["gora"]:
+        y1 = y0 + wys_pr
+    szer_pr = min(max(w, wys_pr / aspekt), w * UCIETA_MAX)
+    if uciete["lewa"] and not uciete["prawa"]:
+        x0 = x1 - szer_pr
+    elif uciete["prawa"] and not uciete["lewa"]:
+        x1 = x0 + szer_pr
+    return x0, y0, x1, y1
+
+
+def punkt_celowania(bt, szer, wys, uciete=None, wzgl=None):
+    """Punkt na butelce, w ktory celuje ramie: zapamietane miejsce kodu (wzgl) albo srodek etykiety."""
+    if uciete is None:
+        m = 3
+        x0, y0, x1, y1 = bt["box"]
+        uciete = {"gora": y0 <= m, "dol": y1 >= wys - m, "lewa": x0 <= m, "prawa": x1 >= szer - m}
+    x0, y0, x1, y1 = pelna_ramka(bt, uciete)
+    rx, ry = wzgl or (0.5, SLEDZ_CEL_WYSOKOSC)
+    px, py = x0 + rx * (x1 - x0), y0 + ry * (y1 - y0)
+    if uciete["gora"] and uciete["dol"]:
+        py = wys / 2  # butelka wyzsza niz kadr - w pionie stoj
+    if uciete["lewa"] and uciete["prawa"]:
+        px = szer / 2
+    return px, py
+
+
+class Inspekcja:
+    """Automat inspekcji: SZUKAM -> CENTRUJE -> CZYTAM -> WYNIK (KAUCYJNA / BEZ_KAUCJI / BRAK_KODU).
+
+    Wynik: ekran + log + http://<IP>:8765/wynik (+ opcjonalnie POST na DECYZJA_URL).
+    BRAK_KODU -> "obroc_butelke": true. Po obrocie: /obrocono -> czyta kod od nowa.
+    """
+
+    # punkty rozgladania wzgledem pozycji startowej (x = lewo/prawo, y = gora/dol, w zakresach z ustawien)
+    PUNKTY = [(0, 0), (-1, 0), (1, 0), (1, 1), (-1, 1), (-1, -1), (1, -1), (0, 0)]
+
+    def __init__(self, st):
+        teraz = time.time()
+        self.srodek = {SLEDZ_STAW_POZIOM: st.here[SLEDZ_STAW_POZIOM], SLEDZ_STAW_PION: st.here[SLEDZ_STAW_PION]}
+        self.stan, self.od, self.bez_celu_od = "SZUKAM", teraz, teraz
+        self.cel, self.wynik, self.wycentrowany_od = None, None, None
+        self.punkt, self._t = 0, None
+        self.reczny = 0.0  # kiedy ostatnio sterowano recznie (wtedy nie rozgladamy sie)
+
+    def po_obrocie(self):
+        """Butelka zostala obrocona - czytaj kod od nowa."""
+        if self.cel:
+            self.stan, self.od, self.wynik = "CZYTAM", time.time(), None
+            stan["inspekcja"] = {"stan": "CZYTAM", "butelka": self.cel}
+
+    def _wynik(self, wynik, kaucja, sled, kaucje):
+        kw = kaucje.kwoty.get(sled.ean) if sled.ean else None
+        self.wynik = {
+            "wynik": wynik, "kaucja": kaucja, "obroc_butelke": wynik == "BRAK_KODU",
+            "butelka": self.cel, "kod": sled.ean, "nazwa": kaucje.nazwy.get(sled.ean or "", ""),
+            "kwota": float(kw[0]) if kw else None, "waluta": kw[1] if kw else None,
+            "czas": time.strftime("%H:%M:%S"),
+        }
+        self.stan = "WYNIK"
+        stan["inspekcja"] = dict(self.wynik, stan="WYNIK")
+        stan["ostatni_wynik"] = dict(self.wynik)  # zostaje, nawet gdy butelka zniknie z kadru
+        print(f"\n=== WYNIK: {wynik} {self.wynik['kod'] or ''} {self.wynik['nazwa']} ===")
+        _log(f"WYNIK {self.wynik}")
+        if DECYZJA_URL:  # w tle - nie blokuje sledzenia
+            def wyslij(dane=dict(self.wynik)):
+                try:
+                    import requests
+
+                    requests.post(DECYZJA_URL, json=dane, timeout=3)
+                except Exception as e:
+                    print("\nnie wyslalem wyniku na", DECYZJA_URL, e)
+
+            threading.Thread(target=wyslij, daemon=True).start()
+        return f"WYNIK: {wynik}"
+
+    def ustaw_czekanie(self, st):
+        """Obecna pozycja kamery = pozycja wyczekiwania (tu drugie ramie przynosi butelke)."""
+        self.srodek = {SLEDZ_STAW_POZIOM: st.here[SLEDZ_STAW_POZIOM], SLEDZ_STAW_PION: st.here[SLEDZ_STAW_PION]}
+
+    def _rozgladaj(self, st, teraz, tylko_powrot=False):
+        """Powolne przeszukiwanie okolicy kamera albo powrot do pozycji wyczekiwania (plynnie)."""
+        dt = 0.05 if self._t is None else min(max(teraz - self._t, 0.0), 0.2)
+        self._t = teraz
+        px, py = self.PUNKTY[self.punkt]
+        cel = {SLEDZ_STAW_POZIOM: self.srodek[SLEDZ_STAW_POZIOM] + px * SZUKAJ_ZAKRES_POZIOM,
+               SLEDZ_STAW_PION: self.srodek[SLEDZ_STAW_PION] + py * SZUKAJ_ZAKRES_PION}
+        dojechal = True
+        for j, c in cel.items():
+            lo, hi = st.limits[j]
+            c = min(max(c, lo), hi)
+            d = c - st.target[j]
+            if abs(d) > 0.5:
+                dojechal = False
+                st.target[j] += math.copysign(min(abs(d), SZUKAJ_PREDKOSC * dt), d)
+                st.wolne.add(j)
+                st.w_sled[j] = math.copysign(SZUKAJ_PREDKOSC, d)
+        if dojechal and not tylko_powrot:
+            self.punkt = (self.punkt + 1) % len(self.PUNKTY)
+
+    def krok(self, sled, kaucje, st, teraz, aktywna):
+        """Jeden krok automatu. Zwraca komunikat albo None."""
+        msg = None
+        if sled.cel != self.cel:  # nowa butelka albo zgubiona
+            self.cel, self.wynik, self.wycentrowany_od = sled.cel, None, None
+            self.stan, self.od = ("CENTRUJE" if sled.cel else "SZUKAM"), teraz
+            if not sled.cel:
+                self.bez_celu_od = teraz
+            self._t = None
+            stan["inspekcja"] = {"stan": self.stan, "butelka": self.cel}
+        if not aktywna:
+            return None
+
+        if self.stan == "SZUKAM":
+            if teraz - self.reczny < 3.0:
+                pass  # sterujesz recznie - nie przeszkadzaj
+            elif ROZGLADANIE and teraz - self.bez_celu_od > SZUKAJ_PO:
+                self._rozgladaj(st, teraz)
+            elif not ROZGLADANIE and teraz - self.bez_celu_od > POWROT_PO:
+                self.punkt = 0  # punkt (0, 0) = pozycja wyczekiwania
+                self._rozgladaj(st, teraz, tylko_powrot=True)
+        elif self.stan == "CENTRUJE":
+            f = sled._filtr or sled.blad[:2] if hasattr(sled, "blad") else None
+            spokojnie = f is not None and max(abs(f[0]), abs(f[1])) < 0.15 and \
+                max(abs(w) for w in sled._w.values()) < 5.0
+            if sled.ean and kaucje.sprawdz(sled.ean) is not None:  # kod odczytany juz w trakcie centrowania
+                msg = self._wynik("KAUCYJNA" if kaucje.sprawdz(sled.ean) else "BEZ_KAUCJI",
+                                  kaucje.sprawdz(sled.ean), sled, kaucje)
+            elif spokojnie:
+                self.wycentrowany_od = self.wycentrowany_od or teraz
+                if teraz - self.wycentrowany_od > WYCENTROWANY_CZAS:
+                    self.stan, self.od = "CZYTAM", teraz
+                    stan["inspekcja"] = {"stan": "CZYTAM", "butelka": self.cel}
+                    msg = "wycentrowana - czytam kod"
+            else:
+                self.wycentrowany_od = None
+        elif self.stan == "CZYTAM":
+            if sled.ean:
+                kaucja = kaucje.sprawdz(sled.ean)
+                if kaucja is not None:
+                    msg = self._wynik("KAUCYJNA" if kaucja else "BEZ_KAUCJI", kaucja, sled, kaucje)
+            elif teraz - self.od > KOD_CZAS:
+                msg = self._wynik("BRAK_KODU", None, sled, kaucje)
+        elif self.stan == "WYNIK" and self.wynik and self.wynik["wynik"] == "BRAK_KODU" and sled.ean:
+            self.stan, self.od = "CZYTAM", teraz  # kod pojawil sie pozniej (np. po obrocie) - rozstrzygnij
+        return msg
+
+    def napis(self, teraz):
+        """(tekst, kolor) do duzego napisu na ekranie."""
+        if self.stan == "SZUKAM":
+            if ROZGLADANIE and teraz - self.bez_celu_od > SZUKAJ_PO:
+                return "SZUKAM BUTELKI - rozgladam sie...", (200, 200, 200)
+            return "CZEKAM NA BUTELKE...", (200, 200, 200)
+        if self.stan == "CENTRUJE":
+            return "CENTRUJE BUTELKE...", (0, 220, 255)
+        if self.stan == "CZYTAM":
+            return f"CZYTAM KOD... {max(0.0, KOD_CZAS - (teraz - self.od)):.1f} s", (0, 220, 255)
+        w = self.wynik or {}
+        if w.get("wynik") == "KAUCYJNA":
+            kw = f" {w['kwota']:.2f} {w['waluta']}" if w.get("kwota") is not None else ""
+            return f"KAUCYJNA{kw}  {w.get('nazwa', '')}", (0, 200, 0)
+        if w.get("wynik") == "BEZ_KAUCJI":
+            return f"BEZ KAUCJI ({w.get('kod')})", (0, 0, 230)
+        return "BRAK KODU - OBROC BUTELKE", (0, 140, 255)
+
+
+_inspekcja = None
 
 
 class SledzenieButelek(Sledzenie):
@@ -1633,7 +2031,8 @@ class SledzenieButelek(Sledzenie):
 
     @staticmethod
     def _pole(b):
-        return b["w"] * b["h"]
+        # butelka ma pierwszenstwo przed "puszka" (siec tak nazywa tez kubki); potem wieksza = blizej
+        return (b["klasa"] == "butelka", b["w"] * b["h"])
 
     def _blisko(self, b, cx, cy, szer):
         return abs(b["cx"] - cx) + abs(b["cy"] - cy) < SLEDZ_PROMIEN * szer
@@ -1643,7 +2042,8 @@ class SledzenieButelek(Sledzenie):
         msg = None
 
         def pasuje(b):
-            if b["h"] < MIN_BUTELKA * wys:
+            prog = BUTELKA_PROG if b["klasa"] == "butelka" else PUSZKA_PROG
+            if b["pewnosc"] < prog or b["h"] < MIN_BUTELKA * wys:
                 return False
             return not SLEDZ_TYLKO_KAUCJA or (b["ean"] and kaucje.sprawdz(b["ean"]))
 
@@ -1664,20 +2064,22 @@ class SledzenieButelek(Sledzenie):
                 self._kand = (najwieksza["cx"], najwieksza["cy"])
                 if self._kand_n >= SLEDZ_POTWIERDZ:
                     self._nr += 1
-                    self.cel, biezacy, self.ean = f"{najwieksza['klasa']}{self._nr}", najwieksza, None
+                    self.cel, biezacy, self.ean = f"butelka{self._nr}", najwieksza, None
                     msg = f"SLEDZE {self.cel}"
             else:
                 self._kand, self._kand_n = None, 0
         elif biezacy is not None:
             if biezacy["h"] < MIN_BUTELKA * wys:
                 msg, self.cel, biezacy = f"{self.cel} ODDALILA SIE - puszczam", None, None
-            elif najwieksza is not None and najwieksza is not biezacy and \
-                    self._pole(najwieksza) > self._pole(biezacy) * PRZELACZ_GDY:
+            elif najwieksza is not None and najwieksza is not biezacy and (
+                    (najwieksza["klasa"] == "butelka") > (biezacy["klasa"] == "butelka")
+                    or (najwieksza["klasa"] == biezacy["klasa"]
+                        and self._pole(najwieksza)[1] > self._pole(biezacy)[1] * PRZELACZ_GDY)):
                 self._inny_n += 1
                 if self._inny_n >= SLEDZ_POTWIERDZ:
                     self._nr += 1
                     stary = self.cel
-                    self.cel, biezacy, self.ean = f"{najwieksza['klasa']}{self._nr}", najwieksza, None
+                    self.cel, biezacy, self.ean = f"butelka{self._nr}", najwieksza, None
                     msg = f"INNA BLIZEJ: {stary} -> {self.cel}"
             else:
                 self._inny_n = 0
@@ -1698,7 +2100,22 @@ class SledzenieButelek(Sledzenie):
         if biezacy["ean"]:
             self.ean = biezacy["ean"]
         self.zrodlo = biezacy["klasa"]
-        self.blad = ((biezacy["cx"] - szer / 2) / (szer / 2), (biezacy["cy"] - wys / 2) / (wys / 2), True)
+        # krawedzie kadru z histereza (wlacza sie przy 3 px, gasnie od 25 px) - bez migotania
+        x0, y0, x1, y1 = biezacy["box"]
+        odl = {"gora": y0, "dol": wys - y1, "lewa": x0, "prawa": szer - x1}
+        for kr, d in odl.items():
+            self._uciete[kr] = d <= 3 if not self._uciete[kr] else d < 25
+        # gdzie na butelce jest kod: zapamietaj (wzgledem pelnej ramki) i celuj tam stale - bez przeskakiwania
+        # miedzy "kod odczytany" a "srodek etykiety"
+        if biezacy.get("kod_xy"):
+            f0, g0, f1, g1 = pelna_ramka(biezacy, self._uciete)
+            rel = ((biezacy["kod_xy"][0] - f0) / max(f1 - f0, 1), (biezacy["kod_xy"][1] - g0) / max(g1 - g0, 1))
+            if 0.0 <= rel[0] <= 1.0 and 0.0 <= rel[1] <= 1.0:
+                k = self.kod_wzgl
+                self.kod_wzgl = rel if k is None else (k[0] + 0.3 * (rel[0] - k[0]), k[1] + 0.3 * (rel[1] - k[1]))
+        px, py = punkt_celowania(biezacy, szer, wys, self._uciete, self.kod_wzgl if SLEDZ_CEL_W_KOD else None)
+        self.punkt = (px, py)
+        self.blad = ((px - szer / 2) / (szer / 2), (py - wys / 2) / (wys / 2), True)
         if msg:
             self._reset()
         self._hist = [h for h in self._hist if teraz - h[0] < 0.6] + [(teraz, self.blad[0], self.blad[1])]
@@ -1715,7 +2132,7 @@ PANEL_KLAWISZY = [
     ("KAMERA", None),
     ("T", "sledzenie wl / wyl"), ("ENTER", "ogladaj puszke (objazd)"),
     ("POZY", None),
-    ("P", "zapisz poze objazdu"), ("C", "usun pozy objazdu"), ("M", "zapisz dom"), ("H", "jedz do domu"),
+    ("P", "zapisz poze objazdu"), ("C", "usun pozy objazdu"), ("M", "tu czekaj na butelke"), ("H", "jedz do domu"),
     ("", None),
     ("Y", "zapisz historie butelek"), ("TAB", "schowaj / pokaz pomoc"), ("Q / ESC", "koniec"),
 ]
@@ -1799,6 +2216,8 @@ def tryb_kamera(port=None, mock=False):
     kaucje, sled = Kaucje(), SledzenieButelek()
     historia = TrackingHistory()
     historia.load()
+    inspekcja = Inspekcja(st)
+    globals()["_inspekcja"] = inspekcja
     detektor = DetektorButelek()
     czytnik = CzytnikKodow()
     kody, cel_od, poprz_cel = [], 0.0, None
@@ -1831,7 +2250,9 @@ def tryb_kamera(port=None, mock=False):
             wys, szer = klatka.shape[:2]
             ostr = ostrosc(klatka)
             butelki = detektor.wykryj(klatka)
-            czytnik.podaj(klatka.copy(), sled.cel, sled.box)  # kody czytane w tle, na kopii klatki
+            czytnik.pauza = inspekcja.stan == "WYNIK" and bool(inspekcja.wynik) and inspekcja.wynik["kod"] is not None
+            if czytnik.potrzebna_klatka():
+                czytnik.podaj(klatka.copy(), sled.cel, sled.box)  # kody czytane w tle, na kopii klatki
             kody = czytnik.kody
             if sled.cel and sled.cel in czytnik.kod_celu:
                 sled.ean = czytnik.kod_celu[sled.cel]
@@ -1843,8 +2264,9 @@ def tryb_kamera(port=None, mock=False):
             # kod w srodku butelki = to jej kod (kaucja)
             for bt in butelki:
                 x0, y0, x1, y1 = bt["box"]
-                bt["ean"] = next((k["ean"] for k in kody if k["ean"] and x0 <= k["cx"] <= x1 and y0 <= k["cy"] <= y1),
-                                 None)
+                kod = next((k for k in kody if k["ean"] and x0 <= k["cx"] <= x1 and y0 <= k["cy"] <= y1), None)
+                bt["ean"] = kod["ean"] if kod else None
+                bt["kod_xy"] = (kod["cx"], kod["cy"]) if kod else None
             for k in kody:
                 if not k["ean"]:
                     continue
@@ -1858,33 +2280,22 @@ def tryb_kamera(port=None, mock=False):
             for bt in butelki:
                 x0, y0, x1, y1 = (int(v * sk) for v in bt["box"])
                 cel = bool(sled.cel and sled.xy and abs(bt["cx"] - sled.xy[0]) + abs(bt["cy"] - sled.xy[1]) < 0.05 * szer)
+                if bt["pewnosc"] < (BUTELKA_PROG if bt["klasa"] == "butelka" else PUSZKA_PROG) and not cel:
+                    continue  # slabe wykrycie, ktore nie jest celem - nie zasmiecaj obrazu
                 ean = bt["ean"] or (sled.ean if cel else None)
                 kaucja = kaucje.sprawdz(ean) if ean else None
                 # zielona = kaucja, czerwona = bez kaucji, zolta = nie wiadomo (kod nieodczytany)
                 kolor = (0, 200, 0) if kaucja else ((0, 0, 230) if kaucja is False else (0, 220, 255))
                 cv2.rectangle(ekran, (x0, y0), (x1, y1), kolor, 6 if cel else 2)
+                if cel and getattr(sled, "punkt", None):  # tu celuje ramie
+                    cv2.drawMarker(ekran, (int(sled.punkt[0] * sk), int(sled.punkt[1] * sk)), kolor,
+                                   cv2.MARKER_TILTED_CROSS, 30, 3)
                 opis = f"{bt['klasa']} {bt['pewnosc']:.0%}" + (" KAUCJA" if kaucja else "") + ("  <- CEL" if cel else "")
                 cv2.putText(ekran, opis, (x0 + 4, max(y0 + 22, 40)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, kolor, 2)
 
-            # status kaucji sledzonej butelki - duzym napisem
-            if sled.cel != poprz_cel:
-                cel_od, poprz_cel = teraz, sled.cel
-            if sled.cel:
-                if sled.ean:
-                    kaucja = kaucje.sprawdz(sled.ean)
-                    if kaucja is None:
-                        napis, kolor = f"SPRAWDZAM KOD {sled.ean}...", (0, 220, 255)
-                    elif kaucja:
-                        kw = kaucje.kwoty.get(sled.ean)
-                        napis = "KAUCYJNA" + (f" {float(kw[0]):.2f} {kw[1]}" if kw else "")
-                        napis += f"  {kaucje.nazwy.get(sled.ean, '')}"
-                        kolor = (0, 200, 0)
-                    else:
-                        napis, kolor = f"BEZ KAUCJI ({sled.ean})", (0, 0, 230)
-                elif teraz - cel_od < KOD_BRAK_PO:
-                    napis, kolor = "SZUKAM KODU...", (0, 220, 255)
-                else:
-                    napis, kolor = "NIE WIDZE KODU - obroc butelke kodem do kamery", (0, 140, 255)
+            # duzy napis: etap inspekcji i wynik (kaucja / bez / obroc butelke)
+            if sledz:
+                napis, kolor = inspekcja.napis(teraz)
                 (tw, th), _ = cv2.getTextSize(napis, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)
                 cv2.rectangle(ekran, (0, 32), (tw + 20, 32 + th + 20), (0, 0, 0), -1)
                 cv2.putText(ekran, napis, (10, 32 + th + 10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, kolor, 2)
@@ -1918,6 +2329,9 @@ def tryb_kamera(port=None, mock=False):
                               f" | cel pan={st.target['pan']:6.1f} wflex={st.target['wflex']:6.1f}")
                     if mial_cel and sled.cel is None and PO_UTRACIE == "dom":
                         zadanie(arm, do_domu, "dom")
+                msg_i = inspekcja.krok(sled, kaucje, st, teraz, sledz and not _zajety.is_set())
+                if msg_i:
+                    pokaz(msg_i)
                 pressed = st.krok()
                 if "y" in pressed or "start" in pressed:
                     zadanie(arm, ogladaj_puszke, "skan")
@@ -1952,7 +2366,8 @@ def tryb_kamera(port=None, mock=False):
                 elif c == "\t":
                     pomoc = not pomoc
                 elif c == "m":
-                    pokaz(zapisz_poze(arm, POZA_DOMOWA))
+                    inspekcja.ustaw_czekanie(st)
+                    pokaz(zapisz_poze(arm, POZA_DOMOWA) + " + tu kamera czeka na butelke")
                 elif c == "p":
                     pozy = wczytaj(PLIK_POZ, {})
                     wolne = [p for p in POZY_SKANU if p not in pozy]
@@ -1966,8 +2381,8 @@ def tryb_kamera(port=None, mock=False):
                 elif c == "y":
                     pokaz(f"zapisano historie ({len(historia.items)} butelek)" if historia.save()
                           else "blad zapisu historii")
-                else:
-                    st.klawisz(c)
+                elif st.klawisz(c):
+                    inspekcja.reczny = time.time()  # sterujesz recznie - nie rozgladaj sie przez 3 s
 
             # napisy na obrazie
             if st.komunikat:
