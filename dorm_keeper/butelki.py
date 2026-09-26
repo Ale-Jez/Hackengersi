@@ -80,6 +80,9 @@ DOMYSLNE = {
     "kal_tag_id": 0,              # AprilTags/tag36h11_00.png
     "kal_tag_mm": 30,             # bok czarnego kwadratu tagu (zmierz linijka po wydruku)
     "kal_tag_nad_czubkiem_mm": 25,  # srodek tagu tyle nad czubkiem szczek (zmierz) - program przelicza na czubek
+    # tag POZIOMO, twarza w gore, na "flagze" z kartonu przy czubku (chwytak w dol): srodek tagu przesuniety od czubka
+    # o [od podstawy, w lewo] mm - para kalibracji to wtedy srodek tagu. Wtedy kal_tag_nad_czubkiem_mm = 0.
+    "kal_tag_przesuniecie_mm": [0, 0],
     "szyjka_nad_stolem_mm": 180,  # wysokosc chwytu nad stolem: szyjka butelki 0,5 l (~20 cm wysokosci, pod nakretka)
     "stol_start_z": 0,            # mm: stad RoArm zaczyna schodzic do stolu (musi byc nad stolem!)
     "stol_dno_z": -200,           # mm: nizej nie schodzi (twardy limit) - brak stolu do tej wysokosci = blad
@@ -462,6 +465,13 @@ def znajdz_tag(jpg, szer, wys, cfg):
     return None
 
 
+def tag_xy(cfg, x, y):
+    """Srodek tagu na flagze: czubek (x, y) + przesuniecie [od podstawy, w lewo], obrocone z podstawa RoArma."""
+    d_r, d_t = cfg.get("kal_tag_przesuniecie_mm") or (0, 0)
+    b = math.atan2(y, x)
+    return x + d_r * math.cos(b) - d_t * math.sin(b), y + d_r * math.sin(b) + d_t * math.cos(b)
+
+
 def opis_temp(arm):
     return "temp " + ("/".join(f"{v:.0f}" for v in arm.temps.values()) + " C" if arm.temps else "?")
 
@@ -554,7 +564,8 @@ def kalibruj_brev(arm, so, cfg, pytaj=zapytaj_brev, log=print, zrodlo="brev"):
             log(f"  x={x:.0f} y={y:.0f}: odpowiedzi VLM rozne o {rozrzut:.0f} px - pomijam")
             continue
         u, v = (odp[0][0] + odp[1][0]) / 2, (odp[0][1] + odp[1][1]) / 2
-        pary.append({"px": list(do_pozycji_kalibracji(u, v, widok, stawy)), "x": tu["x"], "y": tu["y"]})
+        tx, ty = tag_xy(cfg, tu["x"], tu["y"])
+        pary.append({"px": list(do_pozycji_kalibracji(u, v, widok, stawy)), "x": tx, "y": ty})
         log(f"  punkt {len(pary)}: ({pary[-1]['px'][0]:.0f}, {pary[-1]['px'][1]:.0f}) px -> x={tu['x']:.0f} "
             f"y={tu['y']:.0f} mm, czubek {tu['z'] - z_stol:+.0f} mm nad stolem"
             f" | {opis_temp(arm)}")
@@ -872,6 +883,9 @@ def test():
         u, v = znajdz_tag(jpg, 640, 360, DOMYSLNE)
         assert abs(u - 329.5) < 2 and abs(v - (129.5 + 50)) < 3, (u, v)
         assert znajdz_tag(jpg, 640, 360, dict(DOMYSLNE, kal_tag_id=1)) is None
+        # flaga 50 mm od podstawy i 20 mm w lewo; RoArm patrzy w +y (podstawa obrocona o 90 st.)
+        tx, ty = tag_xy(dict(DOMYSLNE, kal_tag_przesuniecie_mm=[50, 20]), 0.0, 200.0)
+        assert abs(tx + 20) < 1e-6 and abs(ty - 250) < 1e-6, (tx, ty)
         assert czubek_z_odpowiedzi('{"tip": [900, 50]}', 896, 504) is None and czubek_z_odpowiedzi("nie", 9, 9) is None
     finally:
         globals()["jedz"], globals()["zapisz"], builtins.input = orig_jedz, orig_zapisz, orig_input
@@ -902,7 +916,14 @@ def main():
     elif cmd == ["idz"] and sys.argv[2:3] and punkt(cfg, sys.argv[2]):
         jedz(arm, punkt(cfg, sys.argv[2]), cfg["chwyt_otwarty"], spd=cfg["spd"])
     elif cmd == ["kalibruj"] and sys.argv[2:3] == ["tag"]:  # jak brev, ale czubek z AprilTaga na chwytaku
-        w = arm.where()  # RoArm ustawiony recznie tak, ze kamera widzi tag: tu srodek siatki, to nachylenie i obrot
+        w = arm.where()  # RoArm ustawiony tak, ze kamera widzi tag: tu srodek siatki, to nachylenie i obrot
+        if not any(w.get(k) for k in ("tB", "tS", "tE", "tT", "tR")):  # silniki wyl. (przestawiony recznie):
+            # cel serw = zmierzone katy, potem moment - ramie zostaje, gdzie jest (jak w panelu RoArma)
+            arm.send({"T": 102, "base": w["b"], "shoulder": w["s"], "elbow": w["e"], "wrist": w["t"],
+                      "roll": w["r"], "hand": w["g"], "spd": 50, "acc": 10})
+            arm.send({"T": 210, "cmd": 1})
+            time.sleep(1.0)
+            w = arm.where()
         cfg.update(kal_brev_start=[w["x"], w["y"]], kal_t=w["tit"], kal_r=w.get("r", 0.0), stol_start_z=w["z"])
         print(f"srodek x={w['x']:.0f} y={w['y']:.0f} mm, nachylenie {w['tit']:.2f} rad")
         kalibruj_brev(arm, so, cfg, pytaj=znajdz_tag, zrodlo="tag")
