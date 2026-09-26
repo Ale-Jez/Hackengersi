@@ -69,7 +69,9 @@ DEFAULTS = {
     "grip_height_mm": 180,        # grab height above the floor: neck of a 0.5 l bottle (~20 cm tall, under the cap)
     # lying bottle (e.g. 1.5 l in the vehicle basket, ~9 cm thick - wider than the gripper): grab it by the neck
     "bottle_pose": "standing",    # "standing" (grab by the neck from above) or "lying" (neck found in the image)
-    "neck_frac": 0.38,            # lying: neck centre this far from the bottle middle, as a fraction of its length
+    "cap_mm": 30,                 # lying: cap diameter (scale for the step below)
+    "neck_from_cap_mm": 35,       # lying: neck centre this far from the cap centre, toward the bottle
+    "neck_frac": 0.38,            # lying, no coloured cap found: neck this far from the middle, fraction of length
     "roll_offset": 0.0,           # rad: gripper roll that makes the jaws close ACROSS the bottle (tune with "aim")
     "floor_start_z": 0,           # mm: the floor search starts here (must be above the floor!)
     "floor_search_mm": 250,       # mm: at most this far down from floor_start_z (hard limit) - no floor = error
@@ -545,6 +547,39 @@ def bottle_axis(img, box, neck_frac=0.38):
     return float(neck[0] + x0), float(neck[1] + y0), math.atan2(d[1], d[0])
 
 
+def cap_neck(img_bgr, box, cap_mm=30.0, neck_from_cap_mm=35.0):
+    """Lying bottle: its coloured cap -> (neck_u, neck_v, axis_angle) or None (white/clear cap, not found).
+    YOLO boxes of a lying clear bottle often cut off the neck, and the cap is the clearest part: a small, roughly
+    round, saturated blob near the bottle, the one furthest from the bottle middle (the label is near the middle).
+    Scale from the cap itself (cap_mm across); the neck is neck_from_cap_mm from the cap toward the bottle."""
+    import cv2
+    import numpy as np
+
+    x0, y0, x1, y1 = box
+    bw, bh = x1 - x0, y1 - y0
+    X0, Y0 = max(0, int(x0 - 0.3 * bw)), max(0, int(y0 - 0.3 * bh))  # the cap may lie outside the box
+    X1, Y1 = min(img_bgr.shape[1], int(x1 + 0.3 * bw)), min(img_bgr.shape[0], int(y1 + 0.3 * bh))
+    hsv = cv2.cvtColor(img_bgr[Y0:Y1, X0:X1], cv2.COLOR_BGR2HSV)
+    mask = ((hsv[..., 1] > 120) & (hsv[..., 2] > 60)).astype(np.uint8)
+    n, _, stats, centres = cv2.connectedComponentsWithStats(mask)
+    middle = np.array([(x0 + x1) / 2 - X0, (y0 + y1) / 2 - Y0])
+    size = max(bw, bh)
+    caps = [(np.linalg.norm(centres[i] - middle), i) for i in range(1, n)
+            if 0.04 * size < max(stats[i, 2], stats[i, 3]) < 0.25 * size   # cap-sized relative to the bottle
+            and 0.6 < stats[i, 2] / stats[i, 3] < 1.6                         # roughly round
+            and stats[i, 4] > 0.5 * stats[i, 2] * stats[i, 3]]                # solid, not a thin line
+    if not caps:
+        return None
+    dist, i = max(caps)
+    if dist < 0.25 * size:  # a coloured blob near the middle is the label, not a cap
+        return None
+    cap = centres[i]
+    d = (middle - cap) / dist  # from the cap toward the bottle
+    px_per_mm = (stats[i, 2] + stats[i, 3]) / 2 / cap_mm
+    neck = cap + d * neck_from_cap_mm * px_per_mm
+    return float(neck[0] + X0), float(neck[1] + Y0), math.atan2(-d[1], -d[0])
+
+
 def jaw_roll(cfg, x, y, axis):
     """Gripper roll so the jaws close across a bottle whose axis points at `axis` (rad, RoArm frame) at (x, y).
     Jaws are symmetric, so the roll is taken within +-pi/2; roll_offset calibrates the jaw direction at roll 0."""
@@ -567,9 +602,11 @@ def target_on_table(so, cfg, timeout=None, skip=()):
         import numpy as np
 
         jpg, fw, _ = so.frame()
-        img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_GRAYSCALE)
+        img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR)
         k = fw / w["width"]  # /frame and /bottles pixels may differ in scale
-        found_axis = bottle_axis(img, [c * k for c in b["box"]], cfg["neck_frac"])
+        box = [c * k for c in b["box"]]
+        found_axis = cap_neck(img, box, cfg["cap_mm"], cfg["neck_from_cap_mm"]) or \
+            bottle_axis(img, box, cfg["neck_frac"])
         if found_axis:
             u, v, axis_px = found_axis[0] / k, found_axis[1] / k, found_axis[2]
 
@@ -738,6 +775,13 @@ def test():
         found_axis = bottle_axis(img, [40, 90, 460, 210], neck_frac=0.38)
         assert found_axis and found_axis[0] > 330 and abs(found_axis[1] - 150) < 6, found_axis
         assert min(abs(found_axis[2]), abs(abs(found_axis[2]) - math.pi)) < 0.05, found_axis
+        # coloured cap: blue 30x30 px cap at the right end of a grey bottle (box cuts the neck off) -> neck 35 px left
+        img = np.full((300, 500, 3), 230, np.uint8)
+        cv2.rectangle(img, (60, 120), (330, 180), (200, 200, 200), -1)
+        cv2.rectangle(img, (400, 135), (430, 165), (200, 60, 0), -1)
+        u, v, a = cap_neck(img, [60, 115, 340, 185])
+        assert abs(u - (414.5 - 35)) < 4 and abs(v - 149.5) < 4 and abs(a) < 0.1, (u, v, a)
+        assert cap_neck(np.full((300, 500, 3), 230, np.uint8), [60, 115, 340, 185]) is None
         # jaws across a bottle lying along the RoArm x axis straight ahead: roll pi/2; along y: roll 0 (offset 0)
         assert abs(abs(jaw_roll(dict(DEFAULTS), 250, 0, 0.0)) - math.pi / 2) < 1e-9
         assert abs(jaw_roll(dict(DEFAULTS), 250, 0, math.pi / 2)) < 1e-9
