@@ -2053,6 +2053,18 @@ def pobierz_yolo():
     return sciezka
 
 
+def yolo_opset21(sciezka):
+    """yolo11n.onnx ma opset 22, a CUDA w onnxruntime nie ma dla niego Conv - cala siec szlaby wtedy na CPU
+    (A100: 40 ms zamiast 7 ms). Jednorazowa konwersja do opsetu 21 (pip install onnx, tylko na maszynie z GPU)."""
+    nowa = sciezka.replace(".onnx", "_op21.onnx")
+    if not os.path.exists(nowa):
+        import onnx
+        from onnx import version_converter
+
+        onnx.save(version_converter.convert_version(onnx.load(sciezka), 21), nowa)
+    return nowa
+
+
 # ----------------------------------------------------------------------------- YOLO liczone na laptopie
 # Na Raspberry YOLO daje ~10 kl/s. Laptop (yolo_laptop.py) sam laczy sie tutaj: POST /yolo z wynikiem poprzedniej
 # klatki, w odpowiedzi dostaje nastepna (pomniejszona). Laptop nic nie nasluchuje = zapora Windows nie przeszkadza.
@@ -2144,9 +2156,19 @@ class DetektorButelek:
                 # na Raspberry bez wentylatora to przegrzanie i zbicie zegara z 2.4 do 1.5 GHz
                 opcje.add_session_config_entry("session.intra_op.allow_spinning", "0")
                 opcje.add_session_config_entry("session.inter_op.allow_spinning", "0")
-                self.yolo = ort.InferenceSession(pobierz_yolo(), opcje, providers=["CPUExecutionProvider"])
+                # GPU (Brev, onnxruntime-gpu) jesli jest, inaczej CPU (Raspberry)
+                sciezka = pobierz_yolo()
+                if "CUDAExecutionProvider" in ort.get_available_providers():
+                    ort.preload_dlls()  # biblioteki CUDA/cuDNN z pip (onnxruntime-gpu[cuda,cudnn])
+                    sciezka = yolo_opset21(sciezka)
+                dostawcy = [p for p in ("CUDAExecutionProvider", "CPUExecutionProvider")
+                            if p in ort.get_available_providers()]
+                self.yolo = ort.InferenceSession(sciezka, opcje, providers=dostawcy)
+                # GPU: osobna sesja na kazda skale - zmiana ksztaltu wejscia w jednej sesji CUDA to ~150 ms, stala ~7 ms
+                self._sesje = {} if "CUDAExecutionProvider" in dostawcy else None
+                self._nowa_sesja = lambda: ort.InferenceSession(sciezka, opcje, providers=dostawcy)
                 self.wejscie = self.yolo.get_inputs()[0].name
-                print("Wykrywanie butelek: YOLO11n")
+                print(f"Wykrywanie butelek: YOLO11n ({self.yolo.get_providers()[0]})")
             except Exception as e:
                 print(f"YOLO niedostepne ({e}) - uzywam SSD. Doinstaluj: pip install onnxruntime")
         if self.yolo is None:
@@ -2202,7 +2224,10 @@ class DetektorButelek:
             pad = np.full((ph, pw, 3), 114, np.uint8)
             pad[:img.shape[0], :img.shape[1]] = img
             x = cv2.cvtColor(pad, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)[None].astype(np.float32) / 255.0
-            out = self.yolo.run(None, {self.wejscie: x})[0][0].T  # N x (4 + 80 klas)
+            if self._sesje is not None and rozm not in self._sesje:
+                self._sesje[rozm] = self._nowa_sesja()
+            sesja = self.yolo if self._sesje is None else self._sesje[rozm]
+            out = sesja.run(None, {self.wejscie: x})[0][0].T  # N x (4 + 80 klas)
             for nr, nazwa in YOLO_KLASY.items():
                 sc = out[:, 4 + nr]
                 for i in np.where(sc >= prog)[0]:
