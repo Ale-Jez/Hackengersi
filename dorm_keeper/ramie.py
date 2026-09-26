@@ -1053,7 +1053,7 @@ small{color:#888}</style></head><body><main><div><img src="/podglad" alt="podgla
 <button data-h="r">R dalej</button><button data-h="f">F blizej</button><span></span>
 <button data-h="u">U obroc</button><span></span><button data-h="o">O obroc</button></div>
 <div class="p"><button data-k="1">wolno</button><button data-k="2">srednio</button><button data-k="3">szybko</button></div>
-<h3>Pozy</h3><div class="p"><button data-k="m">M tu czekaj</button><button data-k="h">H dom</button>
+<h3>Pozy</h3><div class="p"><button data-k="m">M tu patrz (stol)</button><button data-k="h">H dom</button>
 <button data-k="y">Y historia</button></div><h3>Ustawienia</h3><div id="suwaki"></div></div></main><script>
 const k=c=>fetch('/klawisz?k='+encodeURIComponent(c));let trzymane={};
 function wcisnij(c){if(trzymane[c])return;k(c);trzymane[c]=setInterval(()=>k(c),1000/30)}
@@ -1113,6 +1113,25 @@ def web_klatka(ekran, czysty=False):
             _web_nowa.notify_all()
 
 
+def _dane_butelek():
+    """Dla RoArma (butelki.py): butelki w kadrze (piksele pelnej klatki) + czy kamera stoi w pozycji patrzenia.
+
+    Pozycja patrzenia = poza zapisana klawiszem M (spoczynek). Tylko z niej obraz da sie przeliczyc na stol.
+    """
+    widok = dict(_web.get("widok") or {"butelki": [], "szer": 0, "wys": 0})
+    stawy = _web.get("stawy") or {}
+    poza = wczytaj(PLIK_POZ, {}).get(POZA_DOMOWA)
+    widok["stawy"] = stawy
+    widok["poza_zapisana"] = bool(poza)
+    widok["w_pozie"] = bool(poza and stawy and all(abs(stawy[j] - poza[j]) < 4.0 for j in MOVE_JOINTS))
+    widok["stoi"] = bool(stawy) and time.time() - _web.get("ruch_t", 0.0) > 0.5 and not _zajety.is_set()
+    widok["sledzenie"] = _web["sledz"]
+    # o ile px przesuwa sie obraz na 1 st. stawu - butelki.py poprawia tym drobne bledy powrotu do pozycji
+    widok["px_na_st"] = {SLEDZ_STAW_POZIOM: SLEDZ_ZNAK_POZIOM * SLEDZ_CZULOSC_POZIOM * widok.get("szer", 0) / 2,
+                         SLEDZ_STAW_PION: SLEDZ_ZNAK_PION * SLEDZ_CZULOSC_PION * widok.get("wys", 0) / 2}
+    return widok
+
+
 def _dane_pokazu():
     """Wszystko dla widoku /pokaz: etap, wynik, co widzi siec, historia i liczniki butelek."""
     wyniki = list(stan.get("wyniki", {}).values())  # ostatni wynik kazdej butelki
@@ -1126,6 +1145,8 @@ def _dane_pokazu():
                     "suma": round(sum(w["kwota"] or 0 for w in kaucyjne), 2)},
         "wykrycia": _web["wykrycia"], "sledzenie": _web["sledz"], "kl_s": stan.get("kl_s", 0),
         "yolo": _web.get("yolo", "lokalnie"), "yolo_kl_s": _zdalny["kl_s"], "laptop": yolo_laptop_aktywny(),
+        "roarm": (_web.get("roarm") or {}).get("stan") if time.time() - (_web.get("roarm") or {}).get("t", 0) < 90
+        else None,
     }
 
 
@@ -1196,6 +1217,28 @@ def serwer_http(arm):
                 self.wfile.write(tresc)
             elif adres.path == "/dane":
                 self._json(_dane_pokazu())
+            elif adres.path == "/butelki":  # RoArm: gdzie stoja butelki (piksele) + czy kamera w pozycji patrzenia
+                self._json(_dane_butelek())
+            elif adres.path == "/sledzenie" and q.get("wl") in ("0", "1"):  # RoArm wlacza/wylacza sledzenie
+                _web_klawisze.put("sledz" + q["wl"])
+                self._json({"ok": True})
+            elif adres.path == "/patrz":  # SO-101 wraca do pozycji patrzenia na stol (poza z klawisza M)
+                poza, stawy = wczytaj(PLIK_POZ, {}).get(POZA_DOMOWA), _web.get("stawy") or {}
+                if not poza:
+                    return self._json({"blad": "brak pozycji patrzenia - ustaw kamere na stol i nacisnij M"}, 409)
+                # sledzenie rusza tylko podstawa i nadgarstkiem - duza roznica w lift/elbow = stara poza z innego
+                # ustawienia ramienia; wielki ruch moglby uderzyc w RoArma
+                if not stawy:
+                    return self._json({"blad": "jeszcze nie wiem, gdzie jest ramie - sprobuj za chwile"}, 409)
+                daleko = [j for j in ("lift", "elbow") if abs(stawy[j] - poza[j]) > 15]
+                if daleko and q.get("wymus") != "1":
+                    return self._json({"blad": f"pozycja patrzenia daleko od obecnej ({', '.join(daleko)}) - "
+                                               "ustaw kamere na stol i nacisnij M w panelu"}, 409)
+                _web_klawisze.put("h")
+                self._json({"ok": True})
+            elif adres.path == "/roarm":  # napis o RoArmie w widoku /pokaz
+                _web["roarm"] = {"stan": q.get("stan", "")[:120], "t": time.time()}
+                self._json({"ok": True})
             elif adres.path == "/yolo":  # laptop: wynik YOLO poprzedniej klatki -> w odpowiedzi nastepna klatka
                 try:
                     wynik_nr = int(q.get("nr", 0))
@@ -2682,6 +2725,11 @@ def tryb_kamera(port=None, mock=False):
             if nr_klatki % 5 == 1:  # ostrosc tylko do napisu na ekranie - nie trzeba co klatke
                 ostr = ostrosc(klatka)
             butelki = detektor.wykryj(klatka, sledzi=bool(sled.cel), duza=sled.rozmiar >= YOLO_DUZA_OD)
+            # dla RoArma (butelki.py): gdzie w kadrze stoja butelki - /butelki
+            _web["widok"] = {"szer": szer, "wys": wys, "t": t_zdjecia, "butelki": [
+                {"klasa": b["klasa"], "pewnosc": round(b["pewnosc"], 3), "cx": round(b["cx"], 1),
+                 "cy": round(b["cy"], 1), "box": [int(v) for v in b["box"]]}
+                for b in butelki if b["pewnosc"] >= (BUTELKA_PROG if b["klasa"] == "butelka" else PUSZKA_PROG)]}
             czytnik.pauza = inspekcja.stan == "WYNIK" and bool(inspekcja.wynik) and inspekcja.wynik["kod"] is not None
             if czytnik.potrzebna_klatka():
                 czytnik.podaj(klatka.copy(), sled.cel, sled.box)  # kody czytane w tle, na kopii klatki
@@ -2773,6 +2821,11 @@ def tryb_kamera(port=None, mock=False):
                 if msg_i:
                     pokaz(msg_i)
                 pressed = st.krok()
+                # dla RoArma: czy kamera stoi (obraz = mapa stolu tylko w nieruchomej pozycji patrzenia)
+                poprz = _web.get("stawy")
+                _web["stawy"] = dict(st.here)
+                _web["ruch_t"] = teraz if not poprz or any(abs(st.here[j] - poprz[j]) > 0.4 for j in MOVE_JOINTS) \
+                    else _web.get("ruch_t", 0.0)
                 if "y" in pressed or "start" in pressed:
                     zadanie(arm, ogladaj_puszke, "skan")
                 if "back" in pressed:

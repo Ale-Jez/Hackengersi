@@ -20,6 +20,7 @@
     --r: 14px;
   }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { height: 100%; margin: 0; }
   body {
     background: radial-gradient(1200px 600px at 20% -10%, #14304a55, transparent), var(--tlo);
@@ -47,6 +48,7 @@
   .na-zywo .kropka { background: var(--kaucja); animation: puls 1.6s infinite; }
   @keyframes puls { 0% { box-shadow: 0 0 0 0 #2ecc7199; } 70% { box-shadow: 0 0 0 9px #2ecc7100; } 100% { box-shadow: 0 0 0 0 #2ecc7100; } }
   button.chip { cursor: pointer; font: inherit; font-size: 14px; }
+  .chip.roarm { color: var(--tekst); border-color: var(--akcent); background: #4cc2ff14; }
   button.chip:hover { color: var(--tekst); }
 
   main { display: grid; grid-template-columns: minmax(0, 1fr) clamp(320px, 30vw, 460px); gap: 18px; min-height: 0; }
@@ -141,6 +143,7 @@
   </div>
   <div class="prawo">
     <span class="chip" id="polaczenie"><span class="kropka"></span><span id="polaczenie-txt">łączę…</span></span>
+    <span class="chip roarm" id="roarm" hidden></span>
     <span class="chip" id="yolo">sieć neuronowa</span>
     <span class="chip" id="sledzenie">śledzenie</span>
     <button class="chip" id="pelny" title="Pełny ekran (F)">⛶ pełny ekran</button>
@@ -246,6 +249,8 @@ async function odswiez() {
     $("polaczenie").classList.add("na-zywo");
     $("polaczenie-txt").textContent = `na żywo · ${Math.round(d.kl_s)} kl/s`;
     $("sledzenie").textContent = d.sledzenie ? "śledzenie włączone" : "śledzenie wyłączone";
+    $("roarm").hidden = !d.roarm;
+    $("roarm").textContent = d.roarm ? "🦾 RoArm: " + d.roarm : "";
     $("yolo").textContent = d.yolo === "laptop" ? `szuka: YOLO na laptopie · ${Math.round(d.yolo_kl_s)} kl/s`
       : (d.inspekcja && d.inspekcja.butelka ? "śledzi: YOLO na Raspberry Pi" : "YOLO na Raspberry Pi");
     $("wykrycia").innerHTML = (d.wykrycia || []).slice(0, 4)
