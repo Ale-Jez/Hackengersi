@@ -10,13 +10,15 @@
   "vel_pid": [0.06, 0.002, 0.0, 0.5],
 
   "camera": "csi",
-  "camera_flip": true,
+  "camera_flip": false,
   "camera_size": [640, 480],
+  "tag_size_cm": 6.0,
+  "tag_focal_px": 947,
 
   "drive_speed": 0.5,
   "min_speed": 0.15,
-  "slow_px": 80,
-  "stop_px": 150,
+  "slow_px": 170,
+  "stop_px": 284,
   "steer_gain": 1.2,
   "pivot_enter": 0.45,
   "pivot_exit": 0.2,
@@ -31,10 +33,10 @@
   "obstacle_timeout": 30,
 
   "route": [
-    {"tag": 1, "stop_px": 150},
+    {"tag": 1, "stop_px": 284},
     {"wait": 5},
     {"drive": [-0.3, -0.3, 1.5]},
-    {"tag": 2, "stop_px": 150},
+    {"tag": 2, "stop_px": 284},
     {"wait": 5}
   ]
 }

@@ -166,7 +166,7 @@ def selftest():
         def frame(self):
             return self.frames.pop(0)
 
-    cfg.update(obstacle_frames=2, search_timeout=5)
+    cfg.update(obstacle_frames=2, search_timeout=5, slow_px=80)  # the 64 px tag must be outside the docking zone
     wheels = Wheels(cfg, mock=True)
     guard = Guard(cfg, wheels)
     guard.obs.hist = None  # learn from the first (clear) test frame, not a floor.npy lying around

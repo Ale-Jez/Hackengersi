@@ -7,6 +7,7 @@ Two MAB **MA-D-GL40 KV70** direct-drive actuators (one per wheel, each with its 
 | `drive.py` | route driving: hybrid steering, tag approach, search, obstacle stop, `selftest` |
 | `motors.py` | the two wheels over CANdle (velocity mode, speed ramp, watchdog feed), `ping` / `test` / `jog` |
 | `vision.py` | newest-frame camera, AprilTag detection, floor-colour obstacle check, `floor` / `snap` |
+| `stream.py` | live annotated camera view at `http://<pi ip>:8000` (tag id, px, distance, corridor, detection rate) |
 | `config.json` | CAN ids, wheel signs, speeds, steering and obstacle tuning, the route |
 
 ## Behaviour
@@ -47,7 +48,7 @@ python drive.py selftest
 3. Set the current / torque limit and the CAN watchdog on each drive with MAB's `candletool` (or MD tool). The GL40 is direct drive (about 0.25 Nm rated), so check that it can push the loaded can on your floor before tuning speed.
 4. Put it on the floor: `python motors.py jog` (w/s, a/d spin, z/c arc turn around the stopped wheel, space to stop, q to quit).
 5. Obstacles: point the car at clear floor, run `python vision.py floor`, then `python vision.py snap` with a box in front. Red pixels in the cyan corridor are "not floor". Tune `obstacle_roi` (fractions of the frame) and `obstacle_frac`.
-6. Tags: `python drive.py tag 1 150`. If it zig-zags, lower `steer_gain`. If it spins too often, raise `pivot_enter`.
+6. Tags: hold a tag at a known distance D cm in front of the camera, read its side px in `stream.py`, and set `tag_focal_px = px × D / tag_size_cm`. The stop is `stop_px = tag_focal_px × tag_size_cm / distance` (6 cm tag: 284 px at 20 cm). Stop `stream.py` before other camera scripts, because only one process can open the camera. Then run `python drive.py tag 1`. If it zig-zags, lower `steer_gain`. If it spins too often, raise `pivot_enter`.
 7. `python drive.py run`.
 
 **Limits:** the obstacle check only looks at colour, so an obstacle the same colour as the floor is invisible, and so is anything outside the corridor. Strong light changes after `vision.py floor` need a re-learn. `max_wheel_rad_s` is 12 rad/s by default. The KV70 could go more than 10× faster at 24 V, so raise it carefully.
