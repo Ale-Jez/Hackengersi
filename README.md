@@ -79,14 +79,14 @@ A cloud GPU (**Nvidia Brev**) runs a **Qwen2.5-VL-7B** vision-language model tha
 │   ├── vision.py         # Camera, AprilTag detection, floor-colour obstacle check
 │   └── config.json       # CAN IDs, wheel signs, speeds, steering tuning, route
 │
-├── dorm_keeper/          # Bottle inspection & deposit check system
-│   ├── ramie.py          # SO-101 all-in-one: camera, YOLO detection, barcode reading,
+├── dorm_keeper/          # SO-101 camera station + RoArm picking
+│   ├── so101_station.py  # SO-101 all-in-one: camera, YOLO detection, barcode reading,
 │   │                     #   arm tracking, web UI (http://<IP>:8765/), Xbox controller
-│   ├── butelki.py        # Full pick-sort cycle: auto-calibration, grab, inspect, deposit
-│   ├── camera.py         # Camera utilities + Kaucja.pl API client
+│   ├── roarm_pick.py     # Camera -> RoArm calibration (AprilTag / VLM) and grab
+│   ├── roarm_panel.py    # RoArm control page (http://<IP>:8765/roarm_panel)
+│   ├── demo.html         # Presentation view (http://<IP>:8765/demo)
 │   ├── yolo_laptop.py    # GPU-accelerated YOLO worker (runs on Brev)
-│   ├── teach.py          # Pose teaching utilities
-│   └── roarm.py          # RoArm helper for dorm_keeper
+│   └── deploy_to_pi.py   # Copy the code to the Pi and restart the service
 │
 ├── Station/              # Early-stage station code (RoArm via USB serial)
 │   ├── roarm.py          # RoArm-M3 over USB serial (JSON lines, 115200 baud)
@@ -304,7 +304,7 @@ Every module has a `selftest` command that runs without hardware:
 ```bash
 python main.py selftest       # Sorting logic (mock arms, camera, LLM)
 python drive.py selftest      # Steering, obstacle, approach logic
-python butelki.py --test      # Full pick-sort-deposit cycle (mock everything)
+python roarm_pick.py --test   # Calibration, kinematics and grab logic (mock arms and camera)
 ```
 
 ---

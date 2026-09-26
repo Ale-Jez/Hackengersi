@@ -1,4 +1,4 @@
-"""SO-101 (camera arm) over its USB servo adapter, trimmed from dorm_keeper/ramie.py.
+"""SO-101 (camera arm) over its USB servo adapter, trimmed from dorm_keeper/so101_station.py.
 
 Angles are degrees from the encoder centre: (ticks - 2048) * 360 / 4096.
 

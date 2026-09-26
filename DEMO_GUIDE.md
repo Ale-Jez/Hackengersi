@@ -14,7 +14,7 @@
 - [ ] `python main.py selftest` passes on Pi #1
 - [ ] `python drive.py selftest` passes on Pi #2
 - [ ] `python vision.py ping` returns OK (Brev connection)
-- [ ] `ramie.py` web UI accessible at `http://malina:8765/`
+- [ ] `so101_station.py` web UI accessible at `http://malina:8765/`
 
 ### Calibration
 - [ ] Camera-to-arm calibration is fresh (recalibrate if anything moved)

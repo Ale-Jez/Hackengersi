@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dorm-Keeper</title>
+<!-- Presentation view: http://<Raspberry IP>:8765/demo  (F = full screen). Data from /data, image from /preview?clean=1 -->
+<style>
+  :root {
+    --bg: #0b0f14;
+    --panel: #121922;
+    --panel-2: #18212c;
+    --line: #243040;
+    --text: #e8eef5;
+    --muted: #8a9aac;
+    --accent: #4cc2ff;
+    --deposit: #2ecc71;
+    --none: #ff5c5c;
+    --rotate: #ffb020;
+    --r: 14px;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: radial-gradient(1200px 600px at 20% -10%, #14304a55, transparent), var(--bg);
+    color: var(--text);
+    font: 16px/1.35 system-ui, "Segoe UI", Roboto, sans-serif;
+    display: grid; grid-template-rows: auto 1fr; gap: 16px; padding: 18px 22px 22px;
+    overflow: hidden;
+  }
+  body.no-cursor { cursor: none; }
+
+  header { display: flex; align-items: center; gap: 16px; }
+  .logo {
+    width: 46px; height: 46px; border-radius: 12px; display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--accent), #2e7bd6); font-weight: 800; font-size: 18px; color: #06121e;
+  }
+  h1 { margin: 0; font-size: 26px; letter-spacing: .3px; }
+  .subtitle { color: var(--muted); font-size: 15px; }
+  .right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 999px;
+    background: var(--panel); border: 1px solid var(--line); font-size: 14px; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--none); }
+  .live .dot { background: var(--deposit); animation: pulse 1.6s infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 #2ecc7199; } 70% { box-shadow: 0 0 0 9px #2ecc7100; } 100% { box-shadow: 0 0 0 0 #2ecc7100; } }
+  button.chip { cursor: pointer; font: inherit; font-size: 14px; }
+  .chip.roarm { color: var(--text); border-color: var(--accent); background: #4cc2ff14; }
+  button.chip:hover { color: var(--text); }
+
+  main { display: grid; grid-template-columns: minmax(0, 1fr) clamp(320px, 30vw, 460px); gap: 18px; min-height: 0; }
+  .left { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 14px; min-height: 0; }
+
+  .camera {
+    position: relative; min-height: 0; border-radius: var(--r); overflow: hidden; background: #000;
+    border: 2px solid var(--line); transition: border-color .4s, box-shadow .4s;
+    display: grid; place-items: center;
+  }
+  .camera img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .camera.DEPOSIT { border-color: var(--deposit); box-shadow: 0 0 40px #2ecc7133; }
+  .camera.NO_DEPOSIT { border-color: var(--none); box-shadow: 0 0 40px #ff5c5c33; }
+  .camera.NO_CODE { border-color: var(--rotate); box-shadow: 0 0 40px #ffb02033; }
+  .overlay { position: absolute; left: 14px; right: 14px; display: flex; gap: 8px; flex-wrap: wrap; pointer-events: none; }
+  .overlay.top { top: 14px; }
+  .overlay.bottom { bottom: 14px; }
+  .overlay .chip { background: #0b0f14cc; backdrop-filter: blur(6px); color: var(--text); }
+  .no-image { position: absolute; color: var(--muted); font-size: 18px; }
+
+  .stages { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .stage {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+    display: flex; align-items: center; gap: 12px; color: var(--muted); transition: all .3s;
+  }
+  .stage .nr {
+    width: 30px; height: 30px; flex: none; border-radius: 50%; display: grid; place-items: center;
+    border: 2px solid var(--line); font-weight: 700; font-size: 14px;
+  }
+  .stage b { display: block; color: inherit; font-size: 16px; }
+  .stage small { font-size: 12.5px; }
+  .stage.done { color: var(--text); }
+  .stage.done .nr { border-color: var(--accent); color: var(--accent); }
+  .stage.now { color: var(--text); border-color: var(--accent); background: #4cc2ff14; }
+  .stage.now .nr { background: var(--accent); border-color: var(--accent); color: #06121e; animation: pulse-a 1.4s infinite; }
+  @keyframes pulse-a { 0% { box-shadow: 0 0 0 0 #4cc2ff88; } 70% { box-shadow: 0 0 0 10px #4cc2ff00; } 100% { box-shadow: 0 0 0 0 #4cc2ff00; } }
+
+  aside { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 14px; min-height: 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 18px 20px; }
+  .caption { font-size: 12.5px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--muted); margin-bottom: 8px; }
+
+  .result { position: relative; overflow: hidden; min-height: 190px; display: flex; flex-direction: column; justify-content: center; }
+  .result .main { font-size: clamp(30px, 3.2vw, 46px); font-weight: 800; line-height: 1.05; }
+  .result .amount { font-size: clamp(22px, 2.2vw, 32px); font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .result .name { margin-top: 10px; font-size: 17px; }
+  .result .ean { margin-top: 4px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; letter-spacing: 1px; }
+  .result.DEPOSIT { background: linear-gradient(135deg, #1b4d33, var(--panel) 70%); border-color: var(--deposit); }
+  .result.DEPOSIT .main, .result.DEPOSIT .amount { color: var(--deposit); }
+  .result.NO_DEPOSIT { background: linear-gradient(135deg, #4d1f22, var(--panel) 70%); border-color: var(--none); }
+  .result.NO_DEPOSIT .main { color: var(--none); }
+  .result.NO_CODE { background: linear-gradient(135deg, #4d3a12, var(--panel) 70%); border-color: var(--rotate); }
+  .result.NO_CODE .main { color: var(--rotate); }
+  .result.new { animation: pop .6s cubic-bezier(.2, 1.4, .4, 1); }
+  @keyframes pop { 0% { transform: scale(.94); opacity: .4; } 100% { transform: scale(1); opacity: 1; } }
+
+  .numbers { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .number { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; }
+  .number b { display: block; font-size: clamp(24px, 2.2vw, 34px); font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .number span { font-size: 13px; color: var(--muted); }
+  .number.green b { color: var(--deposit); }
+
+  .history { display: flex; flex-direction: column; min-height: 0; }
+  .history ol { list-style: none; margin: 0; padding: 0; overflow: hidden; display: flex; flex-direction: column; gap: 8px; }
+  .history li {
+    display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px;
+    padding: 10px 12px; border-radius: 10px; background: var(--panel-2);
+  }
+  .history li.new { animation: slide-in .5s ease-out; }
+  @keyframes slide-in { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .history time { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .history .what { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .badge { font-size: 12px; font-weight: 700; padding: 4px 9px; border-radius: 999px; white-space: nowrap; }
+  .badge.DEPOSIT { background: #2ecc7122; color: var(--deposit); }
+  .badge.NO_DEPOSIT { background: #ff5c5c22; color: var(--none); }
+  .badge.NO_CODE { background: #ffb02022; color: var(--rotate); }
+  .empty { color: var(--muted); font-size: 15px; }
+
+  @media (max-width: 900px) {
+    body { overflow: auto; height: auto; }
+    main { grid-template-columns: 1fr; }
+    .camera { aspect-ratio: 16 / 9; }
+    .stages { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">DK</div>
+  <div>
+    <h1>Dorm-Keeper</h1>
+    <div class="subtitle">The robot checks whether a bottle has a deposit: SO-101 with a camera · YOLO11n · EAN code</div>
+  </div>
+  <div class="right">
+    <span class="chip" id="connection"><span class="dot"></span><span id="connection-txt">connecting…</span></span>
+    <span class="chip roarm" id="roarm" hidden></span>
+    <span class="chip" id="yolo">neural network</span>
+    <span class="chip" id="tracking">tracking</span>
+    <button class="chip" id="full" title="Full screen (F)">⛶ full screen</button>
+  </div>
+</header>
+
+<main>
+  <section class="left">
+    <div class="camera" id="camera">
+      <div class="no-image" id="no-image">Waiting for the camera image…</div>
+      <img id="image" alt="Image from the camera on the SO-101 arm">
+      <div class="overlay top"><span class="chip">● Camera on the SO-101 arm</span></div>
+      <div class="overlay bottom" id="detections"></div>
+    </div>
+    <div class="stages" id="stages">
+      <div class="stage" data-stage="SEARCHING"><span class="nr">1</span><div><b>Searching</b><small>the neural network looks for bottles</small></div></div>
+      <div class="stage" data-stage="CENTERING"><span class="nr">2</span><div><b>Centering</b><small>the arm points the camera at the bottle</small></div></div>
+      <div class="stage" data-stage="READING"><span class="nr">3</span><div><b>Reading the code</b><small>EAN code from the label</small></div></div>
+      <div class="stage" data-stage="RESULT"><span class="nr">4</span><div><b>Result</b><small>deposit database</small></div></div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="card result" id="result">
+      <div class="caption">Last bottle</div>
+      <div class="main" id="r-main">Waiting for a bottle</div>
+      <div class="amount" id="r-amount"></div>
+      <div class="name" id="r-name"></div>
+      <div class="ean" id="r-ean"></div>
+    </div>
+    <div class="numbers">
+      <div class="number"><b id="n-bottles">0</b><span>checked</span></div>
+      <div class="number green"><b id="n-deposit">0</b><span>with a deposit</span></div>
+      <div class="number green"><b id="n-total">PLN 0.00</b><span>deposit to recover</span></div>
+    </div>
+    <div class="card history">
+      <div class="caption">History</div>
+      <ol id="history"><li class="empty">No bottles yet</li></ol>
+    </div>
+  </aside>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const ORDER = ["SEARCHING", "CENTERING", "READING", "RESULT"];
+const LABELS = { DEPOSIT: "Deposit", NO_DEPOSIT: "No deposit", NO_CODE: "Rotate the bottle" };
+const money = (amount, currency) => new Intl.NumberFormat("en-GB", { style: "currency", currency: currency || "PLN" }).format(amount || 0);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+// image: MJPEG stream; after a drop (program restart, WiFi) it reconnects by itself
+const image = $("image");
+function connect() { image.src = "/preview?clean=1&t=" + Date.now(); }
+image.onload = () => $("no-image").hidden = true;
+image.onerror = () => { $("no-image").hidden = false; setTimeout(connect, 1500); };
+connect();
+
+let lastKey = null, lastHistory = null;
+
+function showResult(d) {
+  const ins = d.inspection || {};
+  const r = ins.state === "RESULT" ? ins : d.last_result;
+  const card = $("result"), camera = $("camera");
+  const key = r ? `${r.time}|${r.code}|${r.result}` : null;
+  card.className = "card result" + (r ? " " + r.result : "");
+  camera.className = "camera" + (ins.state === "RESULT" ? " " + ins.result : "");
+  if (!r) return;
+  $("r-main").textContent = LABELS[r.result] || r.result;
+  $("r-amount").textContent = r.result === "DEPOSIT" && r.amount != null ? money(r.amount, r.currency) : "";
+  $("r-name").textContent = r.name || (r.result === "NO_CODE" ? "Code not visible – the other arm rotates the bottle" : "");
+  $("r-ean").textContent = r.code ? "EAN " + r.code : "";
+  if (key !== lastKey) {
+    if (lastKey !== null) { card.classList.remove("new"); void card.offsetWidth; card.classList.add("new"); }
+    lastKey = key;
+  }
+}
+
+function showStage(d) {
+  const stage = (d.inspection && d.inspection.state) || "SEARCHING";
+  const i = ORDER.indexOf(stage);
+  document.querySelectorAll(".stage").forEach((el, j) => {
+    el.classList.toggle("now", j === i);
+    el.classList.toggle("done", j < i);
+  });
+}
+
+function showHistory(d) {
+  const h = d.history || [];
+  const key = h.map(r => r.time + r.result).join();
+  if (key === lastHistory) return;
+  const notFirst = lastHistory !== null;
+  lastHistory = key;
+  $("history").innerHTML = h.length ? h.map((r, i) => `
+    <li class="${i === 0 && notFirst ? "new" : ""}">
+      <time>${esc(r.time)}</time>
+      <span class="what">${esc(r.name || (r.code ? "EAN " + r.code : "code not read"))}</span>
+      <span class="badge ${esc(r.result)}">${esc(LABELS[r.result] || r.result)}${r.result === "DEPOSIT" && r.amount != null ? " · " + money(r.amount, r.currency) : ""}</span>
+    </li>`).join("") : '<li class="empty">No bottles yet</li>';
+}
+
+async function refresh() {
+  try {
+    const d = await (await fetch("/data", { cache: "no-store" })).json();
+    $("connection").classList.add("live");
+    $("connection-txt").textContent = `live · ${Math.round(d.fps)} fps`;
+    $("tracking").textContent = d.tracking ? "tracking on" : "tracking off";
+    $("roarm").hidden = !d.roarm;
+    $("roarm").textContent = d.roarm ? "🦾 RoArm: " + d.roarm : "";
+    $("yolo").textContent = d.yolo === "laptop" ? `searching: YOLO on the laptop · ${Math.round(d.yolo_fps)} fps`
+      : (d.inspection && d.inspection.bottle ? "tracking: YOLO on the Raspberry Pi" : "YOLO on the Raspberry Pi");
+    $("detections").innerHTML = (d.detections || []).slice(0, 4)
+      .map(b => `<span class="chip">network sees: ${esc(b.cls)} ${Math.round(b.conf * 100)}%</span>`).join("");
+    $("n-bottles").textContent = d.counter.bottles;
+    $("n-deposit").textContent = d.counter.deposit;
+    $("n-total").textContent = money(d.counter.total);
+    showStage(d); showResult(d); showHistory(d);
+  } catch (e) {
+    $("connection").classList.remove("live");
+    $("connection-txt").textContent = "no connection";
+  }
+  setTimeout(refresh, 400);
+}
+refresh();
+
+// full screen: button or F; the cursor hides after 3 s without movement
+function fullScreen() {
+  document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {});
+}
+$("full").onclick = fullScreen;
+addEventListener("keydown", e => { if (e.key.toLowerCase() === "f") fullScreen(); });
+let cursor;
+addEventListener("mousemove", () => {
+  document.body.classList.remove("no-cursor");
+  clearTimeout(cursor);
+  cursor = setTimeout(() => document.body.classList.add("no-cursor"), 3000);
+});
+</script>
+</body>
+</html>

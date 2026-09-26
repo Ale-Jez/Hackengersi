@@ -1,5 +1,5 @@
 {
-  "spoczynek": {
+  "look": {
     "pan": 9.2,
     "lift": -37.4,
     "elbow": 22.5,
@@ -7,7 +7,7 @@
     "wroll": -85.0,
     "grip": 27.1
   },
-  "skan1": {
+  "scan1": {
     "pan": 9.1,
     "lift": -37.4,
     "elbow": 22.5,

@@ -21,7 +21,7 @@ pip install -r requirements.txt
 ```bash
 python Raspberry/main.py selftest
 python Raspberry-Auto/drive.py selftest
-python dorm_keeper/butelki.py --test
+python dorm_keeper/roarm_pick.py --test
 ```
 
 ## ⚠️ Hardware Safety Checklist
