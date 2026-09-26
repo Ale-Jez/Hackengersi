@@ -186,6 +186,19 @@ class SO101:
             raise RuntimeError(odp["blad"])
 
     def klatka(self):
+        """Swieza klatka w pelnej rozdzielczosci z /klatka (1920x1080 - maly tag wychodzi ostrzej) -> (jpg, szer, wys).
+        Stary ramie.py bez /klatka: podglad 640 px ponizej. Czekamy 0.3 s, zeby klatka byla sprzed ruchu, nie w trakcie."""
+        import cv2
+        import numpy as np
+
+        time.sleep(0.3)
+        r = requests.get(self.url + "/klatka", timeout=5)
+        if r.status_code == 200:
+            h, w = cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_GRAYSCALE).shape
+            return r.content, w, h
+        return self._podglad_klatka()
+
+    def _podglad_klatka(self):
         """Jedna swieza klatka z /podglad?czysty (JPEG 640 px szer., ramki YOLO bez napisow) -> (jpg, szer, wys).
         Pierwsza klatka strumienia bywa stara (sprzed ruchu) - bierzemy druga."""
         import cv2

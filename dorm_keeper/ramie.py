@@ -1249,6 +1249,19 @@ def serwer_http(arm):
                 self.wfile.write(tresc)
             elif adres.path == "/podglad":
                 self._podglad(czysty="czysty" in q)
+            elif adres.path == "/klatka":  # jedna swieza klatka w pelnej rozdzielczosci (kalibracja: maly tag)
+                import cv2
+
+                surowa = _web.get("surowa")
+                if surowa is None:
+                    self.send_error(503)
+                    return
+                jpg = cv2.imencode(".jpg", surowa, [cv2.IMWRITE_JPEG_QUALITY, 92])[1].tobytes()
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(jpg)))
+                self.end_headers()
+                self.wfile.write(jpg)
             elif adres.path == "/pokaz":  # widok na prezentacje (plik czytany za kazdym razem - mozna go edytowac)
                 try:
                     with open(os.path.join(_katalog, "pokaz.html"), "rb") as f:
@@ -2795,6 +2808,7 @@ def tryb_kamera(port=None, mock=False):
             ok, klatka, t_zdjecia = kam.read()  # najnowsza klatka + kiedy przyszla z kamery
             if not ok:
                 continue
+            _web["surowa"] = klatka  # /klatka (tylko referencja - kodowane dopiero na zadanie)
             teraz = time.time()
             if teraz > t_klatki:  # kl/s petli (wygladzone) - na obrazie i w /status
                 stan["kl_s"] = round(0.9 * stan.get("kl_s", 0.0) + 0.1 / (teraz - t_klatki), 1)
