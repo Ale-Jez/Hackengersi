@@ -6,6 +6,7 @@ so there is no custom server to write. BREV_KEY (env) is sent as the bearer toke
 
     python vision.py photo [out.jpg]     save one frame
     python vision.py ask photo.jpg       send a photo to Brev and print the items
+    python vision.py ping                check the Pi -> Brev link (models list + a one-word reply)
     python vision.py                     self-check (no hardware, no network)
 """
 import base64
@@ -141,6 +142,16 @@ if __name__ == "__main__":
         out = sys.argv[2] if len(sys.argv) > 2 else "photo.jpg"
         cv2.imwrite(out, Camera(cfg["camera"]).frame())
         print("->", out)
+    elif sys.argv[1:2] == ["ping"]:
+        url, key = cfg["brev_url"].rstrip("/"), os.environ.get("BREV_KEY")
+        hdr = {"Authorization": f"Bearer {key}"} if key else {}
+        r = requests.get(f"{url}/v1/models", headers=hdr, timeout=10)
+        r.raise_for_status()  # 401 = wrong/missing BREV_KEY; timeout = wrong IP or port not exposed
+        print("models:", [m["id"] for m in r.json()["data"]])
+        r = requests.post(f"{url}/v1/chat/completions", headers=hdr, timeout=60, json={
+            "model": cfg["brev_model"], "max_tokens": 5, "messages": [{"role": "user", "content": "Reply with just: OK"}]})
+        r.raise_for_status()
+        print("reply:", r.json()["choices"][0]["message"]["content"])
     elif sys.argv[1:2] == ["ask"]:
         img = cv2.imread(sys.argv[2])
         items = ask_llm(img, cfg["brev_url"], cfg["brev_model"])

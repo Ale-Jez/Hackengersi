@@ -43,7 +43,14 @@ EOF
 [ -f "$KEYFILE" ] || (umask 077; openssl rand -hex 16 > "$KEYFILE")
 KEY=$(cat "$KEYFILE")
 
+# Tailscale: the Pi reaches this box as http://hackengersi:PORT whatever its public IP is.
+# First run prints a login link; log in with the same Tailscale account as the Pi.
+command -v tailscale >/dev/null || curl -fsSL https://tailscale.com/install.sh | sh
+tailscale status >/dev/null 2>&1 || sudo tailscale up --hostname hackengersi
+
 up() { curl -sf -H "Authorization: Bearer $KEY" "localhost:$PORT/v1/models" >/dev/null; }
+# the root cause is the FIRST error in the log; the last lines are only the wrapper traceback
+die() { grep -m10 -E "Error|ERROR" "$LOG" || true; echo "--- last lines of $LOG ---"; tail -5 "$LOG"; echo "$1"; exit 1; }
 
 if up; then
     echo "server already running"
@@ -55,17 +62,16 @@ else
     echo "starting $MODEL (first run downloads ~16 GB, a few minutes), log: $LOG"
     for _ in $(seq 180); do   # 15 min
         up && break
-        kill -0 "$pid" 2>/dev/null || { tail -30 "$LOG"; echo "server died, see above"; exit 1; }
+        kill -0 "$pid" 2>/dev/null || die "server died, full log: $LOG"
         sleep 5
     done
-    up || { tail -30 "$LOG"; echo "not ready after 15 min"; exit 1; }
+    up || die "not ready after 15 min, full log: $LOG"
 fi
 
 cat <<EOF
 
 READY on port $PORT. On the Pi:
-  1. Raspberry/config.json:  "brev_url": "http://$(curl -s https://api.ipify.org || echo BREV-HOST):$PORT"   (IP of this box; check in the Brev console)
+  1. Raspberry/config.json:  "brev_url": "http://hackengersi:$PORT"   (Tailscale, Pi must be on the same tailnet)
   2. export BREV_KEY=$KEY
-  3. python vision.py ask p.jpg
-If the Pi cannot connect, expose TCP port $PORT for this instance in the Brev console.
+  3. python vision.py ping
 EOF
