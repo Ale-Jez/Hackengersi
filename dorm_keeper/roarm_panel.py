@@ -69,12 +69,8 @@ class PanelRoArma:
                 ws = websocket.create_connection(f"ws://{self.ip}/ws", timeout=5)
                 while True:
                     d = json.loads(ws.recv())
-                    if d.get("T") == 1051 and isinstance(d.get("temp"), list):
-                        temp = d["temp"]
-                        self.stan["temp_serw"] = dict(zip(SERWA_ROARM, temp))
-                        self.stan["temp_t"] = time.time()
-                        najw = max(temp)
-                        self.goracy = najw >= SERWO_GORACE[1] or (self.goracy and najw > SERWO_GORACE[0])
+                    if d.get("T") == 1051:
+                        self._temperatury(d)
                     elif d.get("T") == -15:
                         self.stan["alarmy"] = {"przeciazenie": bool(d.get("Stalltor")),
                                                "przegrzanie": bool(d.get("Stalltep")),
@@ -82,6 +78,15 @@ class PanelRoArma:
             except Exception:  # RoArm wylaczony / restart - probuj dalej
                 self.stan.pop("temp_serw", None)
                 time.sleep(2)
+
+    def _temperatury(self, d):
+        """T:1051 "temp" -> stan + blokada przegrzania. Z /ws (WiFi) albo z /js (USB przez roarm_usb.py - bez /ws)."""
+        temp = d.get("temp")
+        if isinstance(temp, list) and temp:
+            self.stan["temp_serw"] = dict(zip(SERWA_ROARM, temp))
+            self.stan["temp_t"] = time.time()
+            najw = max(temp)
+            self.goracy = najw >= SERWO_GORACE[1] or (self.goracy and najw > SERWO_GORACE[0])
 
     # ------------------------------------------------------------------ RoArm
     def _js(self, cmd, timeout=1.5):
@@ -93,6 +98,7 @@ class PanelRoArma:
         d = json.loads(self._js({"T": 105}))
         if d.get("T") != 1051 or d.get("x") is None:
             raise RuntimeError("RoArm nie podaje pozycji (zasilanie serw?)")
+        self._temperatury(d)
         return d
 
     def _jedz(self, cel, spd=0.2):

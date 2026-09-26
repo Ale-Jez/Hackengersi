@@ -23,7 +23,8 @@ import tarfile
 PI = os.environ.get("PI", "hackengersi@malina.local")
 PYTHON_PI = "~/Hackengersi/.venv/bin/python"  # venv z opencv, onnxruntime, zxing-cpp, feetech-servo-sdk
 KOD = ["ramie.py", "camera.py", "pizza.py", "teach.py", "roarm.py", "butelki.py", "pokaz.html", "roarm_panel.py",
-       "../Raspberry/roarm_wifi.py", "../Raspberry/roarm_console.py"]  # RoArm przez WiFi (kod kolegi)
+       "../Raspberry/roarm_wifi.py", "../Raspberry/roarm_console.py",  # RoArm przez WiFi (kod kolegi)
+       "../Raspberry/roarm_usb.py"]  # RoArm przez USB: localhost:8766 udaje strone RoArma (usluga roarm-usb)
 DANE = ["poses_so101.json", "kaucja.json", "tracking_history.json", "roarm_kaucja.json"]  # tylko gdy na Pi ich brak
 MODEL = os.path.join("modele", "yolo11n.onnx")
 
@@ -37,6 +38,19 @@ Environment=OPENCV_LOG_LEVEL=ERROR
 ExecStart={python} -u ramie.py --web
 Restart=always
 RestartSec=5
+
+[Install]
+WantedBy=default.target
+"""
+
+USLUGA_USB = """[Unit]
+Description=RoArm przez USB: http://localhost:8766/js (to samo API co WiFi RoArma)
+
+[Service]
+WorkingDirectory=%h/dorm_keeper
+ExecStart={python} -u roarm_usb.py
+Restart=always
+RestartSec=3
 
 [Install]
 WantedBy=default.target
@@ -80,6 +94,7 @@ def paczka(z_modelem):
             with open(os.path.join(_katalog, MODEL), "rb") as f:
                 dodaj("modele/yolo11n.onnx", f.read())
         dodaj("dorm-keeper.service", USLUGA.format(python=PYTHON_PI.replace("~", "%h")).encode())
+        dodaj("roarm-usb.service", USLUGA_USB.format(python=PYTHON_PI.replace("~", "%h")).encode())
     return bufor.getvalue()
 
 
@@ -98,8 +113,10 @@ mkdir -p "$D/modele" ~/.config/systemd/user
 cp "$T"/kod/* "$D"/
 for f in "$T"/dane/*; do [ -e "$f" ] && { [ -e "$D/$(basename "$f")" ] || cp "$f" "$D"/; }; done
 [ -d "$T/modele" ] && cp "$T"/modele/* "$D/modele/"
-cp "$T/dorm-keeper.service" ~/.config/systemd/user/
+cp "$T/dorm-keeper.service" "$T/roarm-usb.service" ~/.config/systemd/user/
 systemctl --user daemon-reload
+systemctl --user enable -q roarm-usb; loginctl enable-linger 2>/dev/null || true
+systemctl --user restart roarm-usb  # RoArm przez USB (roarm_ip "localhost:8766"); bez kabla restartuje sie co 3 s
 """ + ("""systemctl --user enable -q dorm-keeper; loginctl enable-linger 2>/dev/null || true
 echo "autostart wlaczony"
 """ if "--autostart" in sys.argv else "") + """if ! systemctl --user is-enabled -q dorm-keeper; then

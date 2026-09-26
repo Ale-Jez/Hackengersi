@@ -1,5 +1,5 @@
 {
-  "roarm_ip": "192.168.32.103",
+  "roarm_ip": "localhost:8766",
   "brev_url": "http://hackengersi:8000",
   "brev_model": "Qwen/Qwen2.5-VL-7B-Instruct",
   "camera": 0,
