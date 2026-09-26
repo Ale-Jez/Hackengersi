@@ -67,6 +67,10 @@ DEFAULTS = {
     # [away from base, to the left] mm - the calibration pair is then the tag centre. Then tag_above_tip_mm = 0.
     "tag_offset_mm": [0, 0],
     "grip_height_mm": 180,        # grab height above the floor: neck of a 0.5 l bottle (~20 cm tall, under the cap)
+    # lying bottle (e.g. 1.5 l in the vehicle basket, ~9 cm thick - wider than the gripper): grab it by the neck
+    "bottle_pose": "standing",    # "standing" (grab by the neck from above) or "lying" (neck found in the image)
+    "neck_frac": 0.38,            # lying: neck centre this far from the bottle middle, as a fraction of its length
+    "roll_offset": 0.0,           # rad: gripper roll that makes the jaws close ACROSS the bottle (tune with "aim")
     "floor_start_z": 0,           # mm: the floor search starts here (must be above the floor!)
     "floor_search_mm": 250,       # mm: at most this far down from floor_start_z (hard limit) - no floor = error
     "upside_down": False,         # True = RoArm hangs upside down: world "up" is -z of the RoArm
@@ -267,20 +271,26 @@ def wait_for_look(so, timeout=40.0):
     raise TimeoutError("SO-101 did not return to its look pose (saved with key M?)")
 
 
-def standing_bottle(so, still_s=1.0, timeout=None, skip=()):
-    """Wait until a bottle stands still on the table (same place for `still_s` s). Returns (u, v, view, b) -
-    the base pixel - or None after timeout. skip = pixels not to take (e.g. a bottle that cannot be grabbed)."""
+def bottle_point(b, lying):
+    """Pixel that marks where a bottle is: base of a standing bottle, middle of a lying one."""
+    return (b["cx"], b["cy"]) if lying else bottle_base(b)
+
+
+def standing_bottle(so, still_s=1.0, timeout=None, skip=(), lying=False):
+    """Wait until a bottle stays still on the table (same place for `still_s` s). Returns (u, v, view, b) -
+    bottle_point - or None after timeout. skip = pixels not to take (e.g. a bottle that cannot be grabbed)."""
     deadline = None if timeout is None else time.monotonic() + timeout
     history = []
     while deadline is None or time.monotonic() < deadline:
         w = so.bottles()
-        good = [b for b in w.get("bottles", []) if b["cls"] == "bottle" and b["box"][3] < w["height"] - 4
-                and all(math.hypot(bottle_base(b)[0] - pu, bottle_base(b)[1] - pv) > 40 for pu, pv in skip)]
+        good = [b for b in w.get("bottles", []) if b["cls"] == "bottle" and (lying or b["box"][3] < w["height"] - 4)
+                and all(math.hypot(bottle_point(b, lying)[0] - pu, bottle_point(b, lying)[1] - pv) > 40
+                        for pu, pv in skip)]
         if not (w.get("at_look") and w.get("still")) or not good:
             history = []
         else:
             b = max(good, key=lambda b: (b["box"][2] - b["box"][0]) * (b["box"][3] - b["box"][1]))
-            u, v = bottle_base(b)
+            u, v = bottle_point(b, lying)
             now = time.monotonic()
             history = [h for h in history if math.hypot(h[1] - u, h[2] - v) < 15] + [(now, u, v)]
             if now - history[0][0] >= still_s and len(history) >= 4:
@@ -507,26 +517,82 @@ def calibrate(arm, so, cfg, locate=ask_brev, log=print, source="brev"):
 
 
 # ----------------------------------------------------------------------------- picking
+def bottle_axis(img, box, neck_frac=0.38):
+    """Lying bottle inside `box` (grey or BGR image) -> (neck_u, neck_v, axis_angle) in image pixels / rad, or None.
+    Axis = main direction of the edge pixels (PCA); the neck end is the narrower one (its edge spread is smaller)."""
+    import cv2
+    import numpy as np
+
+    x0, y0, x1, y1 = (max(0, int(v)) for v in box)
+    crop = img[y0:y1, x0:x1]
+    if crop.ndim == 3:
+        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    ys, xs = np.nonzero(cv2.Canny(cv2.GaussianBlur(crop, (5, 5), 0), 40, 120))
+    if len(xs) < 50:
+        return None
+    pts = np.column_stack([xs, ys]).astype(np.float64)
+    c = pts.mean(axis=0)
+    d = np.linalg.svd(pts - c, full_matrices=False)[2][0]  # axis direction (unit)
+    along, across = (pts - c) @ d, (pts - c) @ np.array([-d[1], d[0]])
+    lo, hi = np.percentile(along, 2), np.percentile(along, 98)
+    length = hi - lo
+
+    def width(sel):  # spread of the edges across the axis in the outer 20% of one end
+        a = across[sel]
+        return np.percentile(a, 95) - np.percentile(a, 5) if a.size > 10 else float("inf")
+    sign = 1 if width(along > hi - 0.2 * length) < width(along < lo + 0.2 * length) else -1
+    neck = c + d * ((lo + hi) / 2 + sign * neck_frac * length)
+    return float(neck[0] + x0), float(neck[1] + y0), math.atan2(d[1], d[0])
+
+
+def jaw_roll(cfg, x, y, axis):
+    """Gripper roll so the jaws close across a bottle whose axis points at `axis` (rad, RoArm frame) at (x, y).
+    Jaws are symmetric, so the roll is taken within +-pi/2; roll_offset calibrates the jaw direction at roll 0."""
+    r = axis + math.pi / 2 - math.atan2(y, x) + cfg["roll_offset"]
+    return (r + math.pi / 2) % math.pi - math.pi / 2
+
+
 def target_on_table(so, cfg, timeout=None, skip=()):
-    """Bottle standing on the table -> ((x, y) of the RoArm, (u, v) pixel); None after timeout."""
+    """Bottle on the table -> ((x, y) of the RoArm, (u, v) pixel, axis angle in the RoArm frame or None);
+    None after timeout. Lying bottle: the target is its neck, found in a full-resolution frame."""
     cal = cfg["calibration"]
-    found = standing_bottle(so, still_s=cfg["still_s"], timeout=timeout, skip=skip)
+    lying = cfg["bottle_pose"] == "lying"
+    found = standing_bottle(so, still_s=cfg["still_s"], timeout=timeout, skip=skip, lying=lying)
     if found is None:
         return None
-    u, v, w, _ = found
-    if w["width"] != cal["width"]:  # another camera resolution than during calibration
-        u, v = u * cal["width"] / w["width"], v * cal["height"] / w["height"]
-    u, v = to_calibration_pose(u, v, w, cal["joints"])
-    return to_table(cal, u, v), (found[0], found[1])
+    u, v, w, b = found
+    axis_px = None
+    if lying:
+        import cv2
+        import numpy as np
+
+        jpg, fw, _ = so.frame()
+        img = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_GRAYSCALE)
+        k = fw / w["width"]  # /frame and /bottles pixels may differ in scale
+        found_axis = bottle_axis(img, [c * k for c in b["box"]], cfg["neck_frac"])
+        if found_axis:
+            u, v, axis_px = found_axis[0] / k, found_axis[1] / k, found_axis[2]
+
+    def table(pu, pv):
+        if w["width"] != cal["width"]:  # another camera resolution than during calibration
+            pu, pv = pu * cal["width"] / w["width"], pv * cal["height"] / w["height"]
+        return to_table(cal, *to_calibration_pose(pu, pv, w, cal["joints"]))
+    x, y = table(u, v)
+    axis = None
+    if axis_px is not None:  # axis direction on the table: a second point 40 px along the axis in the image
+        x2, y2 = table(u + 40 * math.cos(axis_px), v + 40 * math.sin(axis_px))
+        axis = math.atan2(y2 - y, x2 - x)
+    return (x, y), (u, v), axis
 
 
-def still_on_table(so, u, v, seconds=1.2):
-    """After a grab: is the bottle still where it stood (the grab failed)?"""
+def still_on_table(so, u, v, seconds=1.2, lying=False):
+    """After a grab: is the bottle still where it was (the grab failed)? Lying: any bottle box around (u, v)."""
     deadline, hits, tries = time.monotonic() + seconds, 0, 0
     while time.monotonic() < deadline:
         w = so.bottles()
         tries += 1
-        if any(math.hypot(bottle_base(b)[0] - u, bottle_base(b)[1] - v) < 30 for b in w.get("bottles", [])):
+        if any((b["box"][0] <= u <= b["box"][2] and b["box"][1] <= v <= b["box"][3]) if lying
+               else math.hypot(bottle_base(b)[0] - u, bottle_base(b)[1] - v) < 30 for b in w.get("bottles", [])):
             hits += 1
         time.sleep(0.2)
     return tries > 0 and hits >= max(2, tries // 2)
@@ -545,7 +611,7 @@ def grab(arm, so, cfg, pick, px=None, log=print):
         go_to(arm, p, opened, spd=spd)
         arm.gripper(closed)
         go_to(arm, p, closed, dz=dz, spd=spd)
-        if not px or not still_on_table(so, *px):
+        if not px or not still_on_table(so, *px, lying=cfg["bottle_pose"] == "lying"):
             return True
         arm.gripper(opened)
     return False
@@ -645,7 +711,7 @@ def test():
         # picking: the bottle stands at (260, 180) -> seen -> RoArm x, y; the grab lifts it
         cfg["calibration"] = cal
         world.update(bottle=(260.0, 180.0), held=False)
-        (x, y), px = target_on_table(so, cfg, timeout=5)
+        (x, y), px, _ = target_on_table(so, cfg, timeout=5)
         assert abs(x - 260) < 2 and abs(y - 180) < 2, (x, y)
         arm2 = RoArm("mock", mock=True)
         arm2.fb.update(x=200.0, y=0.0, z=50.0, tit=1.57, r=0.0)
@@ -662,6 +728,19 @@ def test():
         assert not grab(arm2, so, cfg, dict(cal["grip"], x=200.0, y=100.0), px=(2 * 240.0 - 57.6, 200.0),
                         log=lambda *_: None)
         assert not in_reach(cfg, 50, 0) and in_reach(cfg, 200, 100)
+        # lying bottle: a synthetic outline (body 60 px wide, neck 20 px) along the image x axis, neck on the right
+        import cv2
+        import numpy as np
+
+        img = np.full((300, 500), 230, np.uint8)
+        cv2.rectangle(img, (60, 120), (340, 180), 90, 3)   # body
+        cv2.rectangle(img, (340, 140), (430, 160), 90, 3)  # neck
+        found_axis = bottle_axis(img, [40, 90, 460, 210], neck_frac=0.38)
+        assert found_axis and found_axis[0] > 330 and abs(found_axis[1] - 150) < 6, found_axis
+        assert min(abs(found_axis[2]), abs(abs(found_axis[2]) - math.pi)) < 0.05, found_axis
+        # jaws across a bottle lying along the RoArm x axis straight ahead: roll pi/2; along y: roll 0 (offset 0)
+        assert abs(abs(jaw_roll(dict(DEFAULTS), 250, 0, 0.0)) - math.pi / 2) < 1e-9
+        assert abs(jaw_roll(dict(DEFAULTS), 250, 0, math.pi / 2)) < 1e-9
         # rest pose: lift first (world up), then the saved joint angles
         sent = []
         arm2.send = sent.append
@@ -767,17 +846,21 @@ def main():
         wait_for_look(so)
         target = target_on_table(so, cfg, timeout=15)
         if target is None:
-            raise SystemExit("no standing bottle seen on the table")
-        (x, y), (u, v) = target
-        print(f"bottle: ({u:.0f}, {v:.0f}) px -> RoArm x={x:.0f} y={y:.0f} mm, {math.hypot(x, y):.0f} mm from the base"
+            raise SystemExit("no bottle seen on the table")
+        (x, y), (u, v), axis = target
+        pick = dict(cfg["calibration"]["grip"], x=x, y=y)
+        if axis is not None:
+            pick["r"] = jaw_roll(cfg, x, y, axis)
+        print(f"bottle{' neck' if axis is not None else ''}: ({u:.0f}, {v:.0f}) px -> RoArm x={x:.0f} y={y:.0f} mm, "
+              f"{math.hypot(x, y):.0f} mm from the base"
+              + (f", axis {math.degrees(axis):.0f} deg, gripper roll {pick['r']:.2f} rad" if axis is not None else "")
               + ("" if in_reach(cfg, x, y) else "  OUT OF REACH"))
         if cmd == ["grab"] and in_reach(cfg, x, y):
-            ok = grab(arm, so, cfg, dict(cfg["calibration"]["grip"], x=x, y=y), px=(u, v))
+            ok = grab(arm, so, cfg, pick, px=(u, v))
             print("HOLDING it - the RoArm waits above the table" if ok
                   else "missed (3 attempts) - change grip_height_mm or repeat the calibration")
         elif cmd == ["aim"] and in_reach(cfg, x, y):
-            go_to(arm, dict(cfg["calibration"]["grip"], x=x, y=y), cfg["grip_open"], dz=cfg["approach_mm"],
-                  spd=cfg["speed"])
+            go_to(arm, pick, cfg["grip_open"], dz=cfg["approach_mm"], spd=cfg["speed"])
             print(f"RoArm is {cfg['approach_mm']} mm above the grab point - the gripper should be above the bottle")
     else:
         print(__doc__)
