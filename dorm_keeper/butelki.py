@@ -85,7 +85,8 @@ DOMYSLNE = {
     "kal_tag_przesuniecie_mm": [0, 0],
     "szyjka_nad_stolem_mm": 180,  # wysokosc chwytu nad stolem: szyjka butelki 0,5 l (~20 cm wysokosci, pod nakretka)
     "stol_start_z": 0,            # mm: stad RoArm zaczyna schodzic do stolu (musi byc nad stolem!)
-    "stol_dno_z": -200,           # mm: nizej nie schodzi (twardy limit) - brak stolu do tej wysokosci = blad
+    "stol_zakres_mm": 250,        # mm: najdalej tyle w dol od stol_start_z (twardy limit) - brak stolu = blad
+    "odwrocony": False,           # True = RoArm podwieszony do gory nogami: "w gore" w swiecie to -z RoArma
     "stol_krok_mm": 5,            # krok schodzenia
     "stol_spd": 0.1,              # predkosc przy stole
     "stol_pauza_s": 0.5,          # po kazdym kroku: serwa dojezdzaja, obciazenie sie ustala
@@ -94,6 +95,9 @@ DOMYSLNE = {
     "stol_max_obciazenie": 350,   # |obciazenie| barku/lokcia ponad to = STOP (jak OBCIAZENIE_STOP w roarm_panel.py)
 }
 NAZWY = ("kamera", "kaucja", "inne", "czekaj", "odbior")
+
+
+GORA = 1  # znak z RoArma dla "w gore" w swiecie: -1, gdy RoArm wisi do gory nogami (cfg "odwrocony")
 
 
 def wczytaj():
@@ -110,6 +114,7 @@ def wczytaj():
             for k in ("roarm_ip", "brev_url", "brev_model"):
                 cfg[k] = cfg[k] or kolega.get(k)
             break
+    globals()["GORA"] = -1 if cfg["odwrocony"] else 1
     return cfg
 
 
@@ -127,16 +132,16 @@ def punkt(cfg, nazwa):
         return None
     ch = kal["chwyt"]
     if nazwa == "kamera":
-        return dict(ch, x=kal["srodek"][0], y=kal["srodek"][1], z=ch["z"] + cfg["kamera_nad_mm"])
+        return dict(ch, x=kal["srodek"][0], y=kal["srodek"][1], z=ch["z"] + GORA * cfg["kamera_nad_mm"])
     xyz = cfg["pojemniki"].get(nazwa) or (cfg["czekaj"] if nazwa == "czekaj" else None)
-    return dict(ch, x=xyz[0], y=xyz[1], z=ch["z"] + xyz[2]) if xyz else None
+    return dict(ch, x=xyz[0], y=xyz[1], z=ch["z"] + GORA * xyz[2]) if xyz else None
 
 
 def jedz(arm, p, g=None, dz=0.0, droll=0.0, spd=0.2, tol=30.0, timeout=20.0):
     """Do punktu p (+dz mm w gore, +droll rad obrotu). Jak RoArm.goto, ale z obrotem nadgarstka (r).
     tol 30 mm: bark Feetech wisi do ~25 mm ponizej celu przy wyciagnietym ramieniu (zmierzone 2026-09-26)."""
     r = max(-3.14, min(3.14, p["r"] + droll))
-    cel = {"x": p["x"], "y": p["y"], "z": p["z"] + dz}
+    cel = {"x": p["x"], "y": p["y"], "z": p["z"] + GORA * dz}  # dz = w gore w swiecie
     try:
         arm.send({"T": 104, **{k: round(v, 1) for k, v in cel.items()}, "t": round(p["t"], 3), "r": round(r, 3),
                   "g": round(DOMYSLNE["chwyt_otwarty"] if g is None else g, 3), "spd": spd})
@@ -333,7 +338,7 @@ def kalibruj(arm, so, cfg, naprowadz=naprowadz_recznie, log=print, naprowadzony=
     ch = {"z": r["z"], "t": r["tit"], "r": r.get("r", 0.0)}
     x0, y0 = r["x"], r["y"]
     tu = dict(ch, x=x0, y=y0)
-    park = dict(ch, x=cfg["czekaj"][0], y=cfg["czekaj"][1], z=ch["z"] + cfg["czekaj"][2])
+    park = dict(ch, x=cfg["czekaj"][0], y=cfg["czekaj"][1], z=ch["z"] + GORA * cfg["czekaj"][2])
     log(f"Chwyt: x={x0:.0f} y={y0:.0f} z={ch['z']:.0f} mm. Dalej RoArm sam - nie ruszaj butelki.")
     so.stan("kalibracja: sam przestawia butelkę")
     # otwarty chwytak w gore i z kadru -> kamera widzi butelke, ktorej nikt nie ruszal -> pierwsza para
@@ -511,13 +516,13 @@ def do_stolu(arm, cfg, x, y, log=print):
     baza = {k: statistics.median(w[k] for w in probki) for k in ("tS", "tE")}
     blad_z = statistics.median(w["z"] for w in probki) - p["z"]
     z = p["z"]
-    while z - cfg["stol_krok_mm"] >= cfg["stol_dno_z"]:
-        z -= cfg["stol_krok_mm"]
+    for _ in range(int(cfg["stol_zakres_mm"] // cfg["stol_krok_mm"])):
+        z -= GORA * cfg["stol_krok_mm"]
         arm.send({"T": 104, "x": round(x, 1), "y": round(y, 1), "z": round(z, 1), "t": p["t"], "r": p["r"], "g": zam,
                   "spd": spd})
         time.sleep(pauza)
         w = pozycja(arm)
-        d_s, d_e, nad = w["tS"] - baza["tS"], w["tE"] - baza["tE"], w["z"] - z - blad_z
+        d_s, d_e, nad = w["tS"] - baza["tS"], w["tE"] - baza["tE"], GORA * (w["z"] - z - blad_z)
         log(f"  stol? z={w['z']:.0f} (cel {z:.0f}) bark {d_s:+.0f} lokiec {d_e:+.0f} nad celem {nad:+.0f} mm"
             f" | {opis_temp(arm)}")
         if max(abs(w["tS"]), abs(w["tE"])) > cfg["stol_max_obciazenie"]:
@@ -525,9 +530,10 @@ def do_stolu(arm, cfg, x, y, log=print):
                       "r": p["r"], "g": zam, "spd": spd})  # STOP = zmierzona poza (nigdy T:0)
             raise RuntimeError(f"za duze obciazenie przy stole (bark {w['tS']}, lokiec {w['tE']}) - STOP")
         if max(abs(d_s), abs(d_e)) > cfg["stol_prog_obciazenia"] or nad > cfg["stol_prog_z_mm"]:
-            jedz(arm, dict(p, z=w["z"] + 10), zam, spd=spd)  # odsun sie od stolu
+            jedz(arm, dict(p, z=w["z"] + GORA * 10), zam, spd=spd)  # odsun sie od stolu
             return w["z"]
-    raise RuntimeError(f"nie ma stolu do z={cfg['stol_dno_z']} mm (stol nizej? stol_dno_z / stol_start_z)")
+    raise RuntimeError(f"nie ma stolu {cfg['stol_zakres_mm']} mm ponizej z={p['z']:.0f} (stol_zakres_mm; "
+                       f"RoArm do gory nogami, a odwrocony = false?)")
 
 
 def kalibruj_brev(arm, so, cfg, pytaj=zapytaj_brev, log=print, zrodlo="brev"):
@@ -554,13 +560,13 @@ def kalibruj_brev(arm, so, cfg, pytaj=zapytaj_brev, log=print, zrodlo="brev"):
         x, y = x0 + dx, y0 + dy
         if not w_zasiegu(cfg, x, y):
             continue
-        gora = {"x": x, "y": y, "z": z_stol + cfg["podejscie_mm"], "t": cfg["kal_t"], "r": cfg["kal_r"]}
+        gora = {"x": x, "y": y, "z": z_stol + GORA * cfg["podejscie_mm"], "t": cfg["kal_t"], "r": cfg["kal_r"]}
         jedz(arm, gora, zam, spd=spd)
-        nisko = z_stol + cfg["kal_brev_nad_stolem_mm"]
+        nisko = z_stol + GORA * cfg["kal_brev_nad_stolem_mm"]
         jedz(arm, dict(gora, z=nisko), zam, spd=spd)
-        wisi = pozycja(arm)["z"] - nisko  # bark wisi -> czubek wyzej niz kazano: popraw raz o zmierzona roznice
+        wisi = GORA * (pozycja(arm)["z"] - nisko)  # czubek wyzej niz kazano: popraw raz o zmierzona roznice
         if wisi > 5:
-            jedz(arm, dict(gora, z=nisko - wisi), zam, spd=spd)
+            jedz(arm, dict(gora, z=nisko - GORA * wisi), zam, spd=spd)
         tu = pozycja(arm)  # para z ZMIERZONEJ pozycji (x, y), nie z polecenia
         widok = czekaj_na_pozycje(so)
         odp = []
@@ -580,7 +586,7 @@ def kalibruj_brev(arm, so, cfg, pytaj=zapytaj_brev, log=print, zrodlo="brev"):
         tx, ty = tag_xy(cfg, tu["x"], tu["y"])
         pary.append({"px": list(do_pozycji_kalibracji(u, v, widok, stawy)), "x": tx, "y": ty})
         log(f"  punkt {len(pary)}: ({pary[-1]['px'][0]:.0f}, {pary[-1]['px'][1]:.0f}) px -> x={tu['x']:.0f} "
-            f"y={tu['y']:.0f} mm, czubek {tu['z'] - z_stol:+.0f} mm nad stolem"
+            f"y={tu['y']:.0f} mm, czubek {GORA * (tu['z'] - z_stol):+.0f} mm nad stolem"
             f" | {opis_temp(arm)}")
         if len(pary) >= 8:
             break
@@ -597,7 +603,7 @@ def kalibruj_brev(arm, so, cfg, pytaj=zapytaj_brev, log=print, zrodlo="brev"):
         raise RuntimeError(f"tylko {len(dobre)} zgodnych punktow (reszta: zle odpowiedzi VLM) - powtorz")
     # chwyt: butelka z gory za szyjke. Kamera widziala czubek na wysokosci stolu, a zbieranie liczy podstawe butelki
     # w obrazie - obie na plaszczyznie stolu, wiec homografia sie zgadza; wysokosc chwytu = stol + szyjka (knob).
-    ch = {"z": z_stol + cfg["szyjka_nad_stolem_mm"], "t": 1.57, "r": 0.0}
+    ch = {"z": z_stol + GORA * cfg["szyjka_nad_stolem_mm"], "t": GORA * 1.57, "r": 0.0}  # t: chwytak w dol
     kal = {"H": H.tolist(), "stawy": stawy, "szer": widok["szer"], "wys": widok["wys"], "pary": dobre, "chwyt": ch,
            "srodek": [statistics.mean(p["x"] for p in dobre), statistics.mean(p["y"] for p in dobre)],
            "stol_z": z_stol, "zrodlo": zrodlo}
@@ -659,7 +665,7 @@ def chwyc(arm, so, cfg, odbior, px=None, log=print):
     nizej/wyzej. True = trzyma (albo nie da sie sprawdzic)."""
     otw, zam, spd, dz = cfg["chwyt_otwarty"], cfg["chwyt_zamkniety"], cfg["spd"], cfg["podejscie_mm"]
     for i, poprawka in enumerate(cfg["poprawki_z"] if px else [0]):
-        p = dict(odbior, z=odbior["z"] + poprawka)
+        p = dict(odbior, z=odbior["z"] + GORA * poprawka)
         if i:
             log(f"   butelka zostala na stole - proba {i + 1} ({poprawka:+d} mm)")
             so.stan(f"chwyta jeszcze raz ({i + 1})")
@@ -883,6 +889,23 @@ def test():
         assert abs(x - 260) < 2 and abs(y - 210) < 2, (x, y)
         assert czubek_z_odpowiedzi('```json\n{"tip": [100, 50]}\n```', 896, 504) == (100.0, 50.0)
         assert czubek_z_odpowiedzi('{"tip": null}', 896, 504) is None
+
+        # RoArm do gory nogami: stol "pod" nim to wieksze z (tu z=+150); schodzi w +z, chwyt 180 mm "nad" stolem = -z
+        globals()["GORA"] = -1
+        try:
+            arm3 = RoArm("mock", mock=True)
+            arm3.fb.update(x=230.0, y=240.0, z=50.0, tit=-1.57, r=0.0, tS=-150, tE=150)
+
+            def send3(c):
+                if c.get("T") == 104:
+                    arm3.fb.update(x=c["x"], y=c["y"], z=min(c["z"], 150.0), tS=-150 + (90 if c["z"] > 150 else 0))
+            arm3.send = send3
+            cfg3 = dict(cfg, kalibracja=None, kal_brev_start=[230, 240], stol_pauza_s=0, stol_start_z=50,
+                        kal_t=-1.57, odwrocony=True)
+            z3 = do_stolu(arm3, cfg3, 230, 240, log=lambda *_: None)
+            assert abs(z3 - 150) < 1 and arm3.fb["z"] < 150, (z3, arm3.fb["z"])
+        finally:
+            globals()["GORA"] = 1
 
         # AprilTag na chwytaku: tag 60x60 px na (300..360, 100..160), bok 30 mm, srodek 25 mm nad czubkiem -> czubek
         # 50 px pod srodkiem tagu; inny tag = None
