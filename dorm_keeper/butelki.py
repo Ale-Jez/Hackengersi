@@ -11,6 +11,9 @@ Przygotowanie (raz, ok. 2 minuty):
   - panel SO-101 (http://<pi>:8765/): kamera ma widziec stol z butelkami -> przycisk M (pozycja patrzenia)
   - python butelki.py kalibruj: postaw butelke, naprowadz na nia chwytak klawiszami (raz), reszte robi RoArm:
     sam przestawia butelke w kilka miejsc i patrzy kamera, gdzie ja widac -> przeliczenie obraz -> stol
+  - albo python butelki.py kalibruj brev: bez butelki i bez czlowieka. RoArm dotyka stolu (wysokosc stolu z obciazenia
+    serw), potem stawia czubek chwytaka w kilku miejscach tuz nad stolem, a VLM na Brev (Qwen2.5-VL) mowi, gdzie ten
+    czubek widac w obrazie SO-101 -> to samo przeliczenie obraz -> stol
   - pojemniki: domyslnie po bokach RoArma, 28 cm od podstawy (lewo = kaucja, prawo = inne). Inne miejsca:
     ustaw RoArma nad pojemnikiem i python butelki.py zapisz kaucja|inne  (tak samo: kamera, czekaj)
 
@@ -26,6 +29,7 @@ Na laptopie, gdy ramie.py dziala na Pi: SO101_URL=http://192.168.32.114:8765 (w 
 import json
 import math
 import os
+import re
 import statistics
 import sys
 import time
@@ -59,6 +63,21 @@ DOMYSLNE = {
     "czekaj": [100, 0, 250],      # x, y, z nad chwytem: RoArm wysoko przy podstawie (poza kadrem kamery)
     "punkty": {},
     "kalibracja": None,           # obraz SO-101 (pozycja patrzenia) -> x, y RoArma: python butelki.py kalibruj
+    # --- kalibruj brev (bez butelki): wszystko do dostrojenia na prawdziwym stole ---
+    "brev_url": None, "brev_model": None,  # None = z Raspberry/config.json kolegi (klucz: $BREV_KEY albo ~/.bashrc)
+    "kal_brev_start": [250, 0],   # x, y (mm): srodek siatki - w zasiegu RoArma i w kadrze kamery SO-101
+    "kal_brev_nad_stolem_mm": 5,  # czubek chwytaka tyle nad stolem, gdy kamera go oglada (plaszczyzna = podstawy butelek)
+    "kal_brev_zgodnosc_px": 30,   # px pelnej klatki: dwie odpowiedzi VLM (dwie klatki) musza sie zgadzac, inaczej pomijam
+    "kal_brev_ransac_mm": 20,     # punkt dalej niz tyle od dopasowanej homografii = zla odpowiedz VLM, odrzucony
+    "szyjka_nad_stolem_mm": 180,  # wysokosc chwytu nad stolem: szyjka butelki 0,5 l (~20 cm wysokosci, pod nakretka)
+    "stol_start_z": 0,            # mm: stad RoArm zaczyna schodzic do stolu (musi byc nad stolem!)
+    "stol_dno_z": -200,           # mm: nizej nie schodzi (twardy limit) - brak stolu do tej wysokosci = blad
+    "stol_krok_mm": 5,            # krok schodzenia
+    "stol_spd": 0.1,              # predkosc przy stole
+    "stol_pauza_s": 0.5,          # po kazdym kroku: serwa dojezdzaja, obciazenie sie ustala
+    "stol_prog_obciazenia": 60,   # zmiana obciazenia barku/lokcia (jedn. firmware) wzgledem powietrza = dotkniecie
+    "stol_prog_z_mm": 6,          # albo: ramie zostaje tyle nad celem (stol trzyma) wzgledem bledu w powietrzu
+    "stol_max_obciazenie": 350,   # |obciazenie| barku/lokcia ponad to = STOP (jak OBCIAZENIE_STOP w roarm_panel.py)
 }
 NAZWY = ("kamera", "kaucja", "inne", "czekaj", "odbior")
 
@@ -70,12 +89,13 @@ def wczytaj():
             cfg.update(json.load(f))
     if os.environ.get("SO101_URL"):  # butelki.py na laptopie, a ramie.py na Pi: SO101_URL=http://192.168.32.114:8765
         cfg["so101_url"] = os.environ["SO101_URL"]
-    if not cfg["roarm_ip"]:
-        for p in KONFIG_KOLEGI:
-            if os.path.exists(p):
-                with open(p, encoding="utf-8") as f:
-                    cfg["roarm_ip"] = json.load(f).get("roarm_ip")
-                break
+    for p in KONFIG_KOLEGI:
+        if os.path.exists(p):
+            with open(p, encoding="utf-8") as f:
+                kolega = json.load(f)
+            for k in ("roarm_ip", "brev_url", "brev_model"):
+                cfg[k] = cfg[k] or kolega.get(k)
+            break
     return cfg
 
 
@@ -149,6 +169,28 @@ class SO101:
         odp = self._get("/patrz")
         if odp.get("blad"):
             raise RuntimeError(odp["blad"])
+
+    def klatka(self):
+        """Jedna swieza klatka z /podglad?czysty (JPEG 640 px szer., ramki YOLO bez napisow) -> (jpg, szer, wys).
+        Pierwsza klatka strumienia bywa stara (sprzed ruchu) - bierzemy druga."""
+        import cv2
+        import numpy as np
+
+        with requests.get(self.url + "/podglad", params={"czysty": 1}, stream=True, timeout=5) as r:
+            buf, koniec = b"", time.monotonic() + 5
+            for kawalek in r.iter_content(65536):
+                buf += kawalek
+                a = buf.find(b"\xff\xd8")
+                b = buf.find(b"\xff\xd9", a)
+                a2 = buf.find(b"\xff\xd8", b)
+                b2 = buf.find(b"\xff\xd9", a2) if a2 >= 0 else -1
+                if min(a, b, a2, b2) >= 0:
+                    jpg = buf[a2:b2 + 2]
+                    h, w = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_GRAYSCALE).shape
+                    return jpg, w, h
+                if time.monotonic() > koniec:
+                    break
+        raise RuntimeError("brak klatek z /podglad (ramie.py dziala? kamera?)")
 
     def stan(self, tekst):
         """Napis o RoArmie w widoku /pokaz (bledy sieci bez znaczenia)."""
@@ -329,6 +371,179 @@ def kalibruj(arm, so, cfg, naprowadz=naprowadz_recznie, log=print, naprowadzony=
     so.stan("kalibracja gotowa")
     log(f"\nGotowe: {len(pary)} punktow, blad srednio {statistics.mean(bledy):.0f} mm, najwiekszy {max(bledy):.0f} mm"
         + (" - duzo: powtorz (butelka stala pewnie?)" if max(bledy) > 25 else " - OK"))
+    return kal
+
+
+# ----------------------------------------------------------------------------- kalibracja z Brev (bez butelki)
+VLM_ROZMIAR = (896, 504)  # 16:9 jak kamera, wielokrotnosc 28 (siatka Qwen-VL) -> odpowiedz VLM w tych pikselach
+PYTANIE_CZUBEK = """This {w}x{h} image is from a camera looking at a table. A black robot arm (RoArm) may reach into
+view with its gripper pointing straight down at the table. Give the pixel point of the very tip of the gripper jaws:
+the lowest point of the gripper, just above the table surface.
+If no robot gripper is visible, answer {{"tip": null}}.
+Answer with only JSON: {{"tip": [x, y]}}"""
+
+
+def brev_klucz():
+    """BREV_KEY z otoczenia, a na Pi (usluga nie czyta ~/.bashrc) z linii export BREV_KEY=... w ~/.bashrc."""
+    if os.environ.get("BREV_KEY"):
+        return os.environ["BREV_KEY"]
+    try:
+        with open(os.path.expanduser("~/.bashrc"), encoding="utf-8") as f:
+            m = re.search(r"^\s*export\s+BREV_KEY=['\"]?([\w-]+)", f.read(), re.M)
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
+def czubek_z_odpowiedzi(tekst, w, h):
+    """Odpowiedz VLM -> (x, y) w obrazie w x h albo None (brak chwytaka, smieci, punkt poza obrazem)."""
+    m = re.search(r"\{.*\}", tekst, re.S)  # modele lubia ```json i proze dookola
+    try:
+        tip = json.loads(m.group(0))["tip"] if m else None
+        x, y = float(tip[0]), float(tip[1])
+    except (ValueError, KeyError, TypeError, IndexError):
+        return None
+    return (x, y) if 0 <= x < w and 0 <= y < h else None
+
+
+def zapytaj_brev(jpg, szer, wys, cfg):
+    """Gdzie w klatce (szer x wys) jest czubek chwytaka RoArma - pyta Qwen2.5-VL na Brev. (u, v) albo None."""
+    import base64
+
+    import cv2
+    import numpy as np
+
+    w, h = VLM_ROZMIAR
+    obraz = cv2.resize(cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_COLOR), VLM_ROZMIAR)
+    maly = cv2.imencode(".jpg", obraz, [cv2.IMWRITE_JPEG_QUALITY, 90])[1]
+    klucz = brev_klucz()
+    r = requests.post(f"{cfg['brev_url'].rstrip('/')}/v1/chat/completions", timeout=60,
+                      headers={"Authorization": f"Bearer {klucz}"} if klucz else {},
+                      json={"model": cfg["brev_model"], "temperature": 0, "max_tokens": 60, "messages": [
+                          {"role": "user", "content": [
+                              {"type": "text", "text": PYTANIE_CZUBEK.format(w=w, h=h)},
+                              {"type": "image_url", "image_url": {
+                                  "url": "data:image/jpeg;base64," + base64.b64encode(maly).decode()}}]}]})
+    r.raise_for_status()
+    xy = czubek_z_odpowiedzi(r.json()["choices"][0]["message"]["content"], w, h)
+    return None if xy is None else (xy[0] * szer / w, xy[1] * wys / h)
+
+
+def opis_temp(arm):
+    return "temp " + ("/".join(f"{v:.0f}" for v in arm.temps.values()) + " C" if arm.temps else "?")
+
+
+def pozycja(arm):
+    """arm.where() z jedna powtorka (RoArm przez WiFi bywa zajety chwile po poleceniu)."""
+    try:
+        return arm.where()
+    except RuntimeError:
+        time.sleep(0.3)
+        return arm.where()
+
+
+def do_stolu(arm, cfg, x, y, log=print):
+    """Czubek chwytaka (w dol, zamkniety) schodzi po kroku nad (x, y), az dotknie stolu -> z stolu (mm).
+
+    Dotkniecie = obciazenie barku/lokcia odbiega od tego w powietrzu albo ramie zostaje nad celem (stol trzyma).
+    Blad z w powietrzu odejmujemy: bark Feetech i tak wisi ~0,05 rad ponizej celu."""
+    zam, spd, pauza = cfg["chwyt_zamkniety"], cfg["stol_spd"], cfg["stol_pauza_s"]
+    p = {"x": x, "y": y, "z": cfg["stol_start_z"], "t": 1.57, "r": 0.0}
+    jedz(arm, p, zam, spd=spd)
+    time.sleep(pauza)
+    probki = [pozycja(arm) for _ in range(3)]
+    baza = {k: statistics.median(w[k] for w in probki) for k in ("tS", "tE")}
+    blad_z = statistics.median(w["z"] for w in probki) - p["z"]
+    z = p["z"]
+    while z - cfg["stol_krok_mm"] >= cfg["stol_dno_z"]:
+        z -= cfg["stol_krok_mm"]
+        arm.send({"T": 104, "x": round(x, 1), "y": round(y, 1), "z": round(z, 1), "t": 1.57, "r": 0, "g": zam,
+                  "spd": spd})
+        time.sleep(pauza)
+        w = pozycja(arm)
+        d_s, d_e, nad = w["tS"] - baza["tS"], w["tE"] - baza["tE"], w["z"] - z - blad_z
+        log(f"  stol? z={w['z']:.0f} (cel {z:.0f}) bark {d_s:+.0f} lokiec {d_e:+.0f} nad celem {nad:+.0f} mm"
+            f" | {opis_temp(arm)}")
+        if max(abs(w["tS"]), abs(w["tE"])) > cfg["stol_max_obciazenie"]:
+            arm.send({"T": 104, "x": round(w["x"], 1), "y": round(w["y"], 1), "z": round(w["z"], 1), "t": 1.57,
+                      "r": 0, "g": zam, "spd": spd})  # STOP = zmierzona poza (nigdy T:0)
+            raise RuntimeError(f"za duze obciazenie przy stole (bark {w['tS']}, lokiec {w['tE']}) - STOP")
+        if max(abs(d_s), abs(d_e)) > cfg["stol_prog_obciazenia"] or nad > cfg["stol_prog_z_mm"]:
+            jedz(arm, dict(p, z=w["z"] + 10), zam, spd=spd)  # odsun sie od stolu
+            return w["z"]
+    raise RuntimeError(f"nie ma stolu do z={cfg['stol_dno_z']} mm (stol nizej? stol_dno_z / stol_start_z)")
+
+
+def kalibruj_brev(arm, so, cfg, pytaj=zapytaj_brev, log=print):
+    """Samokalibracja bez butelki i bez czlowieka: RoArm stawia czubek chwytaka tuz nad stolem w kilku miejscach,
+    VLM na Brev mowi, gdzie ten czubek widac w obrazie SO-101 -> homografia obraz -> stol (jak kalibruj())."""
+    import cv2
+    import numpy as np
+
+    zam, spd = cfg["chwyt_zamkniety"], cfg["stol_spd"]
+    log("SAMOKALIBRACJA (Brev). SO-101 patrzy na stol...")
+    so.sledzenie(False)
+    so.patrz()
+    stawy = dict(czekaj_na_pozycje(so)["stawy"])
+    x0, y0 = cfg["kal_brev_start"]
+    if not w_zasiegu(cfg, x0, y0):
+        raise RuntimeError(f"kal_brev_start {x0}, {y0} poza zasiegiem RoArma {cfg['zasieg_mm']}")
+    so.stan("kalibracja: szuka stołu")
+    z_stol = do_stolu(arm, cfg, x0, y0, log=log)
+    log(f"Stol: z={z_stol:.0f} mm | {opis_temp(arm)}")
+    so.stan("kalibracja: VLM szuka chwytaka")
+    k = cfg["kalibracja_krok_mm"]
+    pary = []
+    for dx, dy in ((0, 0), (k, 0), (0, k), (-k, 0), (0, -k), (k, k), (-k, -k), (k, -k), (-k, k)):
+        x, y = x0 + dx, y0 + dy
+        if not w_zasiegu(cfg, x, y):
+            continue
+        gora = {"x": x, "y": y, "z": z_stol + cfg["podejscie_mm"], "t": 1.57, "r": 0.0}
+        jedz(arm, gora, zam, spd=spd)
+        jedz(arm, dict(gora, z=z_stol + cfg["kal_brev_nad_stolem_mm"]), zam, spd=spd)
+        widok = czekaj_na_pozycje(so)
+        odp = []
+        for _ in range(2):  # dwie klatki, dwa pytania: przypadkowa odpowiedz sie nie powtorzy
+            jpg, w_obr, h_obr = so.klatka()
+            uv = pytaj(jpg, w_obr, h_obr, cfg)
+            odp.append(None if uv is None else (uv[0] * widok["szer"] / w_obr, uv[1] * widok["wys"] / h_obr))
+        jedz(arm, gora, zam, spd=spd)  # w gore, zanim pojedzie dalej (nie szura po stole)
+        if None in odp:
+            log(f"  x={x:.0f} y={y:.0f}: VLM nie widzi chwytaka (poza kadrem?) - pomijam | {opis_temp(arm)}")
+            continue
+        rozrzut = math.hypot(odp[0][0] - odp[1][0], odp[0][1] - odp[1][1])
+        if rozrzut > cfg["kal_brev_zgodnosc_px"]:
+            log(f"  x={x:.0f} y={y:.0f}: odpowiedzi VLM rozne o {rozrzut:.0f} px - pomijam")
+            continue
+        u, v = (odp[0][0] + odp[1][0]) / 2, (odp[0][1] + odp[1][1]) / 2
+        pary.append({"px": list(do_pozycji_kalibracji(u, v, widok, stawy)), "x": x, "y": y})
+        log(f"  punkt {len(pary)}: ({pary[-1]['px'][0]:.0f}, {pary[-1]['px'][1]:.0f}) px -> x={x:.0f} y={y:.0f} mm"
+            f" | {opis_temp(arm)}")
+        if len(pary) >= 8:
+            break
+    if len(pary) < 4:
+        raise RuntimeError(f"tylko {len(pary)} punktow z chwytakiem w kadrze - zmien kal_brev_start albo poze kamery")
+
+    src = np.float32([p["px"] for p in pary])
+    dst = np.float32([[p["x"], p["y"]] for p in pary])
+    H, maska = cv2.findHomography(src, dst, cv2.RANSAC, cfg["kal_brev_ransac_mm"])
+    if H is None:
+        raise RuntimeError("kalibracja nie wyszla - powtorz")
+    dobre = [p for p, m in zip(pary, maska.ravel()) if m]
+    if len(dobre) < 4:
+        raise RuntimeError(f"tylko {len(dobre)} zgodnych punktow (reszta: zle odpowiedzi VLM) - powtorz")
+    # chwyt: butelka z gory za szyjke. Kamera widziala czubek na wysokosci stolu, a zbieranie liczy podstawe butelki
+    # w obrazie - obie na plaszczyznie stolu, wiec homografia sie zgadza; wysokosc chwytu = stol + szyjka (knob).
+    ch = {"z": z_stol + cfg["szyjka_nad_stolem_mm"], "t": 1.57, "r": 0.0}
+    kal = {"H": H.tolist(), "stawy": stawy, "szer": widok["szer"], "wys": widok["wys"], "pary": dobre, "chwyt": ch,
+           "srodek": [statistics.mean(p["x"] for p in dobre), statistics.mean(p["y"] for p in dobre)],
+           "stol_z": z_stol, "zrodlo": "brev"}
+    bledy = [math.hypot(*(a - b for a, b in zip(na_stol(kal, *p["px"]), (p["x"], p["y"])))) for p in dobre]
+    cfg["kalibracja"] = kal
+    zapisz(cfg)
+    so.stan("kalibracja gotowa")
+    log(f"\nGotowe: {len(dobre)}/{len(pary)} punktow, blad srednio {statistics.mean(bledy):.0f} mm, najwiekszy "
+        f"{max(bledy):.0f} mm" + (" - duzo: powtorz" if max(bledy) > 25 else " - OK") + f" | {opis_temp(arm)}")
     return kal
 
 
@@ -573,6 +788,39 @@ def test():
         w = jedna_butelka(arm, FakeSO(), cfg, log=lambda *_: None, xy=(240.0, 200.0), px=(2 * 240.0 - 57.6, 200.0))
         assert w["wynik"] == "NIE_CHWYCONA", w
         assert not w_zasiegu(cfg, 50, 0) and w_zasiegu(cfg, 200, 100)
+
+        # kalibracja z Brev: bez butelki; stol na z=-100, udawany VLM widzi czubek chwytaka (klatka 640x360);
+        # z 9 punktow siatki: 3 poza zasiegiem (>380 mm), 1 poza kadrem -> 5 par
+        stol = -100.0
+        arm2 = RoArm("mock", mock=True)
+        arm2.fb.update(x=230.0, y=240.0, z=50.0, tit=1.57, r=0.0, tS=-150, tE=150)
+
+        def send2(c):
+            if c.get("T") == 104:  # stol zatrzymuje ramie i naciska na bark
+                arm2.fb.update(x=c["x"], y=c["y"], z=max(c["z"], stol), tS=-150 + (90 if c["z"] < stol else 0))
+        arm2.send = send2
+
+        class FakeSO2(FakeSO):
+            def klatka(self):
+                return b"", 640, 360
+
+        def fake_vlm(jpg, w, h, c):
+            x, y = arm2.fb["x"], arm2.fb["y"]
+            if (x, y) == (160.0, 170.0):
+                return None  # tu chwytak poza kadrem
+            return (2 * x - 19.2 * 3) * w / 1920, 2 * (y - 100) * h / 1080
+
+        swiat["trzyma"] = True  # butelki nie ma na stole
+        cfg2 = dict(cfg, kalibracja=None, kal_brev_start=[230, 240], stol_pauza_s=0)
+        so2 = FakeSO2()
+        kal = kalibruj_brev(arm2, so2, cfg2, pytaj=fake_vlm, log=lambda *_: None)
+        assert abs(kal["stol_z"] - stol) < 1 and kal["chwyt"]["z"] == stol + cfg2["szyjka_nad_stolem_mm"], kal
+        assert len(kal["pary"]) == 5 and all((p["x"], p["y"]) != (160.0, 170.0) for p in kal["pary"]), kal["pary"]
+        x, y = na_stol(kal, *do_pozycji_kalibracji(2 * 260 - 19.2 * 3, 2 * (210 - 100), so2.butelki(), kal["stawy"]))
+        assert abs(x - 260) < 2 and abs(y - 210) < 2, (x, y)
+        assert czubek_z_odpowiedzi('```json\n{"tip": [100, 50]}\n```', 896, 504) == (100.0, 50.0)
+        assert czubek_z_odpowiedzi('{"tip": null}', 896, 504) is None
+        assert czubek_z_odpowiedzi('{"tip": [900, 50]}', 896, 504) is None and czubek_z_odpowiedzi("nie", 9, 9) is None
     finally:
         globals()["jedz"], globals()["zapisz"], builtins.input = orig_jedz, orig_zapisz, orig_input
     print("test ok")
@@ -601,6 +849,8 @@ def main():
         print("zapisano", sys.argv[2], cfg["punkty"][sys.argv[2]])
     elif cmd == ["idz"] and sys.argv[2:3] and punkt(cfg, sys.argv[2]):
         jedz(arm, punkt(cfg, sys.argv[2]), cfg["chwyt_otwarty"], spd=cfg["spd"])
+    elif cmd == ["kalibruj"] and sys.argv[2:3] == ["brev"]:  # bez butelki i bez czlowieka: VLM na Brev
+        kalibruj_brev(arm, so, cfg)
     elif cmd == ["kalibruj"]:  # "kalibruj gotowe" = chwytak juz stoi na szyjce butelki (bez klawiatury)
         kalibruj(arm, so, cfg, naprowadzony=sys.argv[2:3] == ["gotowe"])
     elif cmd in (["gdzie"], ["celuj"]):
