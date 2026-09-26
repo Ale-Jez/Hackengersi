@@ -97,6 +97,7 @@ DOMYSLNE = {
 NAZWY = ("kamera", "kaucja", "inne", "czekaj", "odbior")
 
 
+IK_NA_PI = False  # True (cfg "ik_na_pi", domyslnie gdy odwrocony): katy stawow liczy Pi - patrz ik()
 GORA = 1  # znak z RoArma dla "w gore" w swiecie: -1, gdy RoArm wisi do gory nogami (cfg "odwrocony")
 
 
@@ -115,6 +116,7 @@ def wczytaj():
                 cfg[k] = cfg[k] or kolega.get(k)
             break
     globals()["GORA"] = -1 if cfg["odwrocony"] else 1
+    globals()["IK_NA_PI"] = cfg.get("ik_na_pi", cfg["odwrocony"])
     return cfg
 
 
@@ -137,14 +139,71 @@ def punkt(cfg, nazwa):
     return dict(ch, x=xyz[0], y=xyz[1], z=ch["z"] + GORA * xyz[2]) if xyz else None
 
 
+# ----------------------------------------------------------------------------- kinematyka RoArma (jak firmware)
+# Firmware (T:104) liczy stawy z x y z sam i zawsze wybiera to samo zgiecie lokcia; RoArm do gory nogami trzymany
+# w drugim zgieciu przy pierwszym ruchu przerzuca lokiec (zmierzone 2026-09-27: lokiec 0.64 -> 0.17 rad, 7 cm obok).
+# Tu to samo co w RoArm-M3_module.h, ale z rozwiazaniem najblizszym obecnym katom, wysylane jako T:102 (same katy).
+L2 = math.hypot(236.82, 30.0)
+T2 = math.atan2(30.0, 236.82)
+L3 = 144.49
+LE = math.hypot(171.67, 13.69)
+TE = math.atan2(13.69, 171.67)
+
+
+def fk(b, s, e, t):
+    """Katy stawow (rad) -> (x, y, z, tit) czubka jak w feedbacku firmware (RoArmM3_computePosbyJointRad)."""
+    a1, a2, a3 = math.pi / 2 - (s + T2), math.pi / 2 - (e + s), math.pi / 2 - (e + s + t + TE)
+    r = L2 * math.cos(a1) + L3 * math.cos(a2) + LE * math.cos(a3)
+    z = L2 * math.sin(a1) + L3 * math.sin(a2) + LE * math.sin(a3)
+    return r * math.cos(b), r * math.sin(b), z, e + s + t - math.pi / 2
+
+
+def ik(x, y, z, tit, teraz):
+    """(x, y, z, tit) -> (b, s, e, t) najblizej katow `teraz` (slownik b s e t z feedbacku). None = poza zasiegiem
+    albo poza limitami firmware (bark +-pi/2, lokiec 0..pi, nadgarstek +-pi/2)."""
+    b = math.atan2(y, x)
+    r = math.hypot(x, y)
+    fi = -(tit + TE)  # kierunek chwytaka (od poziomu, w gore +)
+    wr, wz = r - LE * math.cos(fi), z - LE * math.sin(fi)
+    d2 = wr * wr + wz * wz
+    c = (d2 - L2 * L2 - L3 * L3) / (2 * L2 * L3)
+    if abs(c) > 1:
+        return None
+    wyniki = []
+    for delta in (math.acos(c), -math.acos(c)):  # kat lacza 3 wzgledem lacza 2 - dwa zgiecia lokcia
+        a = math.atan2(wz, wr) - math.atan2(L3 * math.sin(delta), L2 + L3 * math.cos(delta))
+        s = math.pi / 2 - T2 - a
+        e = math.pi / 2 - s - (a + delta)
+        t = tit + math.pi / 2 - e - s
+        if -math.pi / 2 <= s <= math.pi / 2 and 0 <= e <= math.pi and -math.pi / 2 <= t <= math.pi / 2:
+            wyniki.append((b, s, e, t))
+    return min(wyniki, key=lambda q: abs(q[1] - teraz["s"]) + abs(q[2] - teraz["e"]), default=None)
+
+
+def polec(arm, x, y, z, t, r, g, spd):
+    """Ruch czubka do x y z (nachylenie t, obrot r, chwytak g). IK_NA_PI: katy z ik() -> T:102, inaczej T:104."""
+    if not IK_NA_PI:
+        arm.send({"T": 104, "x": round(x, 1), "y": round(y, 1), "z": round(z, 1), "t": round(t, 3), "r": round(r, 3),
+                  "g": round(g, 3), "spd": spd})
+        return
+    teraz = arm.where()
+    # nadgarstek na granicy (+-pi/2): najblizsze nachylenie, ktore sie da (czubek i tak w x y z; tag dalej widac)
+    q = next((q for dt in (0.0, *(k * 0.02 * sg for k in range(1, 26) for sg in (-1, 1)))
+              for q in [ik(x, y, z, t + dt, teraz)] if q), None)
+    if q is None:
+        raise RuntimeError(f"RoArm tam nie siegnie: x={x:.0f} y={y:.0f} z={z:.0f} nachylenie {t:.2f}")
+    b, s, e, tt = q
+    arm.send({"T": 102, "base": round(b, 4), "shoulder": round(s, 4), "elbow": round(e, 4), "wrist": round(tt, 4),
+              "roll": round(r, 3), "hand": round(g, 3), "spd": int(spd * 1000), "acc": 10})
+
+
 def jedz(arm, p, g=None, dz=0.0, droll=0.0, spd=0.2, tol=30.0, timeout=20.0):
     """Do punktu p (+dz mm w gore, +droll rad obrotu). Jak RoArm.goto, ale z obrotem nadgarstka (r).
     tol 30 mm: bark Feetech wisi do ~25 mm ponizej celu przy wyciagnietym ramieniu (zmierzone 2026-09-26)."""
     r = max(-3.14, min(3.14, p["r"] + droll))
     cel = {"x": p["x"], "y": p["y"], "z": p["z"] + GORA * dz}  # dz = w gore w swiecie
     try:
-        arm.send({"T": 104, **{k: round(v, 1) for k, v in cel.items()}, "t": round(p["t"], 3), "r": round(r, 3),
-                  "g": round(DOMYSLNE["chwyt_otwarty"] if g is None else g, 3), "spd": spd})
+        polec(arm, cel["x"], cel["y"], cel["z"], p["t"], r, DOMYSLNE["chwyt_otwarty"] if g is None else g, spd)
     except RuntimeError as e:
         if "not answering" not in str(e):
             raise  # np. "Queue full"
@@ -518,16 +577,15 @@ def do_stolu(arm, cfg, x, y, log=print):
     z = p["z"]
     for _ in range(int(cfg["stol_zakres_mm"] // cfg["stol_krok_mm"])):
         z -= GORA * cfg["stol_krok_mm"]
-        arm.send({"T": 104, "x": round(x, 1), "y": round(y, 1), "z": round(z, 1), "t": p["t"], "r": p["r"], "g": zam,
-                  "spd": spd})
+        polec(arm, x, y, z, p["t"], p["r"], zam, spd)
         time.sleep(pauza)
         w = pozycja(arm)
         d_s, d_e, nad = w["tS"] - baza["tS"], w["tE"] - baza["tE"], GORA * (w["z"] - z - blad_z)
         log(f"  stol? z={w['z']:.0f} (cel {z:.0f}) bark {d_s:+.0f} lokiec {d_e:+.0f} nad celem {nad:+.0f} mm"
             f" | {opis_temp(arm)}")
         if max(abs(w["tS"]), abs(w["tE"])) > cfg["stol_max_obciazenie"]:
-            arm.send({"T": 104, "x": round(w["x"], 1), "y": round(w["y"], 1), "z": round(w["z"], 1), "t": p["t"],
-                      "r": p["r"], "g": zam, "spd": spd})  # STOP = zmierzona poza (nigdy T:0)
+            arm.send({"T": 102, "base": w["b"], "shoulder": w["s"], "elbow": w["e"], "wrist": w["t"], "roll": w["r"],
+                      "hand": w["g"], "spd": 50, "acc": 10})  # STOP = zmierzone katy (nigdy T:0)
             raise RuntimeError(f"za duze obciazenie przy stole (bark {w['tS']}, lokiec {w['tE']}) - STOP")
         if max(abs(d_s), abs(d_e)) > cfg["stol_prog_obciazenia"] or nad > cfg["stol_prog_z_mm"]:
             jedz(arm, dict(p, z=w["z"] + GORA * 10), zam, spd=spd)  # odsun sie od stolu
@@ -889,6 +947,27 @@ def test():
         assert abs(x - 260) < 2 and abs(y - 210) < 2, (x, y)
         assert czubek_z_odpowiedzi('```json\n{"tip": [100, 50]}\n```', 896, 504) == (100.0, 50.0)
         assert czubek_z_odpowiedzi('{"tip": null}', 896, 504) is None
+
+        # kinematyka: feedback RoArma 2026-09-27 (b s e t) -> z 270 mm; ik(fk(q)) wraca do tego samego zgiecia
+        x, y, z, tit = fk(2.37, 0.26, 0.17, 1.56)
+        assert abs(z - 270) < 2 and abs(math.hypot(x, y) - 301) < 2, (x, y, z)
+        for q in ((2.37, 0.25, 0.64, 1.2), (2.37, 0.26, 0.17, 1.4), (0.3, -0.4, 1.9, 0.2)):
+            x, y, z, tit = fk(*q)
+            q2 = ik(x, y, z, tit, {"s": q[1], "e": q[2]})
+            assert q2 and max(abs(u - v) for u, v in zip(q, q2)) < 1e-6, (q, q2)
+        assert ik(900, 0, 0, 0, {"s": 0, "e": 1}) is None
+        # nadgarstek na granicy: tego nachylenia nizej sie nie da, polec() bierze najblizsze mozliwe
+        wys = []
+        mock = RoArm("mock", mock=True)
+        mock.fb.update(b=2.37, s=0.25, e=0.64, t=1.565)
+        mock.send = wys.append
+        globals()["IK_NA_PI"] = True
+        try:
+            assert ik(-214.8, 208.3, 179.4, 0.87, {"s": 0.25, "e": 0.64}) is None
+            polec(mock, -214.8, 208.3, 179.4, 0.87, -1.64, 3.0, 0.1)
+            assert wys[-1]["T"] == 102 and abs(wys[-1]["wrist"]) <= math.pi / 2, wys
+        finally:
+            globals()["IK_NA_PI"] = False
 
         # RoArm do gory nogami: stol "pod" nim to wieksze z (tu z=+150); schodzi w +z, chwyt 180 mm "nad" stolem = -z
         globals()["GORA"] = -1
