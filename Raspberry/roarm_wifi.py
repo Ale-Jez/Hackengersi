@@ -78,6 +78,13 @@ class RoArm:
             raise Overheat(f"supply {self.volts:.2f} V outside {VOLT_RANGE[0]}-{VOLT_RANGE[1]} V: "
                            "check the power supply")
         hot = {k: v for k, v in self.temps.items() if v >= TEMP_MAX_C}
+        if hot and not self.mock:  # one glitched reading (wrist 26 -> 58 -> 26 C, 2026-09-27): confirm with a fresh one
+            time.sleep(0.2)
+            try:
+                self.where()
+            except RuntimeError:
+                pass
+            hot = {k: v for k, v in self.temps.items() if v >= TEMP_MAX_C}
         if hot:
             raise Overheat(f"servo too hot {hot} (limit {TEMP_MAX_C:.0f} C): let it cool, all temps {self.temps}")
 
