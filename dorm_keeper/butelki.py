@@ -126,8 +126,9 @@ def punkt(cfg, nazwa):
     return dict(ch, x=xyz[0], y=xyz[1], z=ch["z"] + xyz[2]) if xyz else None
 
 
-def jedz(arm, p, g=None, dz=0.0, droll=0.0, spd=0.2, tol=15.0, timeout=20.0):
-    """Do punktu p (+dz mm w gore, +droll rad obrotu). Jak RoArm.goto, ale z obrotem nadgarstka (r)."""
+def jedz(arm, p, g=None, dz=0.0, droll=0.0, spd=0.2, tol=30.0, timeout=20.0):
+    """Do punktu p (+dz mm w gore, +droll rad obrotu). Jak RoArm.goto, ale z obrotem nadgarstka (r).
+    tol 30 mm: bark Feetech wisi do ~25 mm ponizej celu przy wyciagnietym ramieniu (zmierzone 2026-09-26)."""
     r = max(-3.14, min(3.14, p["r"] + droll))
     cel = {"x": p["x"], "y": p["y"], "z": p["z"] + dz}
     try:
@@ -529,7 +530,12 @@ def kalibruj_brev(arm, so, cfg, pytaj=zapytaj_brev, log=print, zrodlo="brev"):
             continue
         gora = {"x": x, "y": y, "z": z_stol + cfg["podejscie_mm"], "t": 1.57, "r": 0.0}
         jedz(arm, gora, zam, spd=spd)
-        jedz(arm, dict(gora, z=z_stol + cfg["kal_brev_nad_stolem_mm"]), zam, spd=spd)
+        nisko = z_stol + cfg["kal_brev_nad_stolem_mm"]
+        jedz(arm, dict(gora, z=nisko), zam, spd=spd)
+        wisi = pozycja(arm)["z"] - nisko  # bark wisi -> czubek wyzej niz kazano: popraw raz o zmierzona roznice
+        if wisi > 5:
+            jedz(arm, dict(gora, z=nisko - wisi), zam, spd=spd)
+        tu = pozycja(arm)  # para z ZMIERZONEJ pozycji (x, y), nie z polecenia
         widok = czekaj_na_pozycje(so)
         odp = []
         for _ in range(2):  # dwie klatki, dwa pytania: przypadkowa odpowiedz sie nie powtorzy
@@ -545,8 +551,9 @@ def kalibruj_brev(arm, so, cfg, pytaj=zapytaj_brev, log=print, zrodlo="brev"):
             log(f"  x={x:.0f} y={y:.0f}: odpowiedzi VLM rozne o {rozrzut:.0f} px - pomijam")
             continue
         u, v = (odp[0][0] + odp[1][0]) / 2, (odp[0][1] + odp[1][1]) / 2
-        pary.append({"px": list(do_pozycji_kalibracji(u, v, widok, stawy)), "x": x, "y": y})
-        log(f"  punkt {len(pary)}: ({pary[-1]['px'][0]:.0f}, {pary[-1]['px'][1]:.0f}) px -> x={x:.0f} y={y:.0f} mm"
+        pary.append({"px": list(do_pozycji_kalibracji(u, v, widok, stawy)), "x": tu["x"], "y": tu["y"]})
+        log(f"  punkt {len(pary)}: ({pary[-1]['px'][0]:.0f}, {pary[-1]['px'][1]:.0f}) px -> x={tu['x']:.0f} "
+            f"y={tu['y']:.0f} mm, czubek {tu['z'] - z_stol:+.0f} mm nad stolem"
             f" | {opis_temp(arm)}")
         if len(pary) >= 8:
             break
