@@ -18,6 +18,14 @@ from serial.tools import list_ports
 USB_SERIAL = os.environ.get("ROARM_USB_SERIAL", "58EEF970F200F011B172C7295C2A50C9")
 KEYS = {"b": "base", "s": "shoulder", "e": "elbow", "t": "wrist", "r": "roll", "g": "hand"}
 ARM_JOINTS = "bsetr"  # what move() waits on; the gripper stalls on the bottle, so it's excluded
+GRIP_OPEN = 1.57  # assumed gripper angle when unknown: the measured g reads 0 whatever the gripper does
+
+
+def unread(d):
+    """True for the stock firmware's placeholder frame: a servo that doesn't answer keeps pos 0,
+    which shows up as angles no joint can reach (unpowered servos, wrong/missing servo ID).
+    base/roll/gripper read plausible values at pos 0, so a dead one of those isn't caught."""
+    return abs(d["s"]) > 3 or abs(d["t"]) > 3 or d["e"] < -0.5
 
 
 class RoArm:
@@ -25,8 +33,9 @@ class RoArm:
         self.mock = os.environ.get("KAUCJO_MOCK") == "1" if mock is None else mock
         self.replies = collections.deque(maxlen=50)  # non-feedback lines, e.g. the T:302 MAC
         self._pose = {k: 0.0 for k in KEYS}
-        self._grip = 0.0  # last commanded gripper rad, see move()
+        self._grip = GRIP_OPEN  # last commanded gripper rad, see move()
         self._seen = 0.0
+        self._bad = 0  # placeholder frames rejected by unread()
         if self.mock:
             return
         port = port or os.environ.get("ROARM_PORT") or self._find_port()
@@ -38,11 +47,16 @@ class RoArm:
         deadline = time.monotonic() + 25  # covers a ~20 s boot after a reset or brown-out
         while not self._seen:
             if time.monotonic() > deadline:
+                if self._bad:
+                    raise TimeoutError(
+                        f"{port}: the ESP32 answers but the servos don't ({self._bad} placeholder "
+                        "frames). Servo power supply off/unplugged, servo bus cable loose, or a "
+                        "replaced servo still has the wrong ID (expected 11-17)?")
                 raise TimeoutError(
                     f"{port}: no T:1051 feedback. Wrong Type-C port (use the one labelled USB, "
                     "not LIDAR), arm unpowered, or still booting (~20 s)?")
             time.sleep(0.05)
-        self._grip = self._pose["g"]
+        self._grip = self._pose["g"] or GRIP_OPEN
 
     @staticmethod
     def _find_port():
@@ -63,6 +77,9 @@ class RoArm:
                 except ValueError:  # partial line right after connecting
                     continue
                 if all(d.get(k) is not None for k in KEYS):  # 0.84-s1 sends nulls when invalid
+                    if unread(d):  # stock firmware: zeros instead of nulls, so don't refresh _seen
+                        self._bad += 1
+                        continue
                     self._pose = {k: d[k] for k in KEYS}
                     self._seen = time.monotonic()
             elif line:
@@ -173,4 +190,7 @@ if __name__ == "__main__":
                 raise SystemExit("spd=0 should be refused")
             except ValueError:
                 pass
+        assert unread({"b": 3.14, "s": -3.14, "e": -1.57, "t": -3.14, "r": 3.14, "g": 0})
+        assert not unread({"b": 0, "s": -1.687, "e": 3.12, "t": 0.2, "r": 0, "g": 0})  # real rest
+        assert RoArm(mock=True)._grip == GRIP_OPEN
         print("mock ok")
