@@ -1044,7 +1044,8 @@ button:active,button.on{background:#0a6ebd}#stop{background:#8a1c1c}
 h3{margin:12px 0 6px;font-size:13px;color:#aaa;text-transform:uppercase}
 label{display:grid;grid-template-columns:1fr 48px;font-size:13px;margin:2px 0}input{grid-column:1/3}
 small{color:#888}</style></head><body><main><div><img src="/podglad" alt="podglad kamery">
-<small>Klawiatura dziala jak w oknie: W/S R/F A/D J/L U/O, 1/2/3, B stop, T sledzenie, M, H, Y, Enter</small></div>
+<small>Klawiatura dziala jak w oknie: W/S R/F A/D J/L U/O, 1/2/3, B stop, T sledzenie, M, H, Y, Enter</small>
+<p><a href="/roarm_panel" style="color:#4cc2ff">Sterowanie RoArmem (nauka chwytu, zbieranie butelek) &rarr;</a></p></div>
 <div><div id="wynik">...</div><div class="p"><button id="obr">Obrocono</button><button data-k="t" id="sl">Sledzenie</button>
 <button data-k="b" id="stop">STOP</button></div>
 <h3>Ruch (przytrzymaj)</h3><div class="p">
@@ -1236,6 +1237,10 @@ def serwer_http(arm):
                                                "ustaw kamere na stol i nacisnij M w panelu"}, 409)
                 _web_klawisze.put("h")
                 self._json({"ok": True})
+            elif adres.path == "/roarm_panel" or adres.path.startswith("/roarm/"):  # sterowanie RoArmem
+                import roarm_panel
+
+                roarm_panel.obsluz(self, adres.path, q)
             elif adres.path == "/roarm":  # napis o RoArmie w widoku /pokaz
                 _web["roarm"] = {"stan": q.get("stan", "")[:120], "t": time.time()}
                 self._json({"ok": True})
