@@ -3,7 +3,7 @@
 # Idempotent: re-run after a fresh instance or a crash, it only does what is missing.
 #
 #   bash Brev/setup.sh         install (first run only), start server, wait until ready
-#   bash Brev/setup.sh stop    stop server
+#   bash Brev/setup.sh stop    stop server and YOLO worker
 #
 # MODEL must equal "brev_model" and PORT the port in "brev_url" in Raspberry/config.json.
 set -euo pipefail
@@ -16,6 +16,7 @@ KEYFILE=$HOME/.brev_key
 
 if [ "${1:-}" = stop ]; then
     pkill -f "vllm serve" && echo "stopped" || echo "was not running"
+    pkill -f "yolo_laptop.py" && echo "YOLO worker stopped" || true
     exit 0
 fi
 
@@ -66,6 +67,20 @@ else
         sleep 5
     done
     up || die "not ready after 15 min, full log: $LOG"
+fi
+
+# YOLO for the Pi (dorm_keeper/yolo_laptop.py on the GPU): pulls frames from http://malina:8765 over Tailscale
+# while the Pi searches for bottles; the Pi falls back to its own CPU within 0.5 s if this stops.
+YVENV=$HOME/yolo-venv
+YLOG=$HOME/yolo.log
+[ -x "$YVENV/bin/python" ] || python3 -m venv "$YVENV"
+"$YVENV/bin/python" -c "import onnxruntime, onnx, cv2, requests" 2>/dev/null ||
+    "$YVENV/bin/pip" install -q "onnxruntime-gpu[cuda,cudnn]" onnx opencv-python-headless numpy requests
+if pgrep -f "yolo_laptop.py" >/dev/null; then
+    echo "YOLO worker already running, log: $YLOG"
+else
+    (cd "$(dirname "$0")/../dorm_keeper" && nohup setsid "$YVENV/bin/python" -u yolo_laptop.py > "$YLOG" 2>&1 &)
+    echo "YOLO worker started, log: $YLOG"
 fi
 
 cat <<EOF
