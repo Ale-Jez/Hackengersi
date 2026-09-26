@@ -1,4 +1,4 @@
-"""YOLO dla Raspberry: laptop wypatruje butelek za Pi (obie skale YOLO w ~25 ms), Pi oszczedza procesor.
+"""YOLO dla Raspberry: laptop albo Brev (GPU, bash Brev/setup.sh startuje go sam) wypatruje butelek za Pi (obie skale YOLO w ~25 ms), Pi oszczedza procesor.
 
 Kamera i SO-101 zostaja na Pi (ramie.py dziala tam jako usluga). Ten program pobiera z Pi pomniejszone klatki,
 liczy YOLO11n i odsyla ramki butelek. To laptop laczy sie z Pi, wiec zapora Windows nie przeszkadza.
@@ -6,7 +6,7 @@ Gdy ramie SLEDZI butelke, Pi liczy YOLO samo (szybka skala 320, ~18 kl/s): opozn
 rozbujaloby ramie. Laptop pomaga wiec przy szukaniu (dalekie butelki, mniej ciepla na Pi bez wentylatora).
 Zamkniesz go (Ctrl+C) - Pi po pol sekundy liczy wszystko samo, nic sie nie psuje.
 
-    python yolo_laptop.py                        Pi pod 192.168.32.114
+    python yolo_laptop.py                        Pi pod http://malina:8765 (Tailscale)
     python yolo_laptop.py http://malina.local:8765
 """
 import os
@@ -20,7 +20,7 @@ import requests
 
 import ramie
 
-PI = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PI_URL", "http://192.168.32.114:8765")).rstrip("/")
+PI = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PI_URL", "http://malina:8765")).rstrip("/")
 WATKI = 2  # tyle klatek naraz w drodze: gdy jedna jedzie przez WiFi, druga sie liczy (WiFi to ~60 ms na klatke)
 POLA = ("cx", "cy", "w", "h", "pewnosc", "klasa", "box")
 
