@@ -1,12 +1,13 @@
-"""YOLO dla Raspberry: laptop albo Brev (GPU, bash Brev/setup.sh startuje go sam) wypatruje butelek za Pi (obie skale YOLO w ~25 ms), Pi oszczedza procesor.
+"""YOLO for the Raspberry Pi: a laptop or Brev (GPU; bash Brev/setup.sh starts it) searches for bottles for the Pi
+(both YOLO scales in ~25 ms), so the Pi saves CPU.
 
-Kamera i SO-101 zostaja na Pi (ramie.py dziala tam jako usluga). Ten program pobiera z Pi pomniejszone klatki,
-liczy YOLO11n i odsyla ramki butelek. To laptop laczy sie z Pi, wiec zapora Windows nie przeszkadza.
-Gdy ramie SLEDZI butelke, Pi liczy YOLO samo (szybka skala 320, ~18 kl/s): opoznienie WiFi (60-400 ms, zmienne)
-rozbujaloby ramie. Laptop pomaga wiec przy szukaniu (dalekie butelki, mniej ciepla na Pi bez wentylatora).
-Zamkniesz go (Ctrl+C) - Pi po pol sekundy liczy wszystko samo, nic sie nie psuje.
+The camera and the SO-101 stay on the Pi (so101_station.py runs there as a service). This program pulls downscaled
+frames from the Pi, runs YOLO11n and sends back the bottle boxes. The worker connects to the Pi, so a Windows firewall
+does not get in the way. While the arm TRACKS a bottle, the Pi runs YOLO itself (fast 320 scale, ~18 fps): the
+network delay (60-400 ms, variable) would make the arm swing. So this worker only helps while searching (distant
+bottles, less heat on a fanless Pi). Close it (Ctrl+C) - within half a second the Pi does everything itself.
 
-    python yolo_laptop.py                        Pi pod http://malina:8765 (Tailscale)
+    python yolo_laptop.py                        Pi at http://malina:8765 (Tailscale)
     python yolo_laptop.py http://malina.local:8765
 """
 import os
@@ -18,75 +19,76 @@ import cv2
 import numpy as np
 import requests
 
-import ramie
+import so101_station
 
 PI = (sys.argv[1] if len(sys.argv) > 1 else os.environ.get("PI_URL", "http://malina:8765")).rstrip("/")
-WATKI = 2  # tyle klatek naraz w drodze: gdy jedna jedzie przez WiFi, druga sie liczy (WiFi to ~60 ms na klatke)
-POLA = ("cx", "cy", "w", "h", "pewnosc", "klasa", "box")
+THREADS = 2  # this many frames in flight: while one travels over the network, the other is computed (~60 ms each)
+FIELDS = ("cx", "cy", "w", "h", "conf", "cls", "box")
 
-_stat = {"n": 0, "yolo": 0.0, "widze": [], "polaczony": None}
+_stats = {"n": 0, "yolo": 0.0, "seen": [], "connected": None}
 _lock = threading.Lock()
 
 
-def watek(detektor):
-    sesja = requests.Session()
-    nr, wynik = 0, None
+def worker(detector):
+    session = requests.Session()
+    nr, result = 0, None
     while True:
         try:
-            # wynik poprzedniej klatki -> w odpowiedzi nastepna klatka (jedno zapytanie na klatke)
-            r = sesja.post(f"{PI}/yolo", params={"nr": nr}, json=wynik, timeout=3)
+            # result of the previous frame -> the next frame comes back in the answer (one request per frame)
+            r = session.post(f"{PI}/yolo", params={"nr": nr}, json=result, timeout=3)
         except requests.RequestException as e:
             with _lock:
-                if _stat["polaczony"] is not False:
-                    print(f"\nPi nie odpowiada ({type(e).__name__}) - dziala ramie.py na Pi? Probuje dalej...")
-                _stat["polaczony"] = False
-            nr, wynik = 0, None
+                if _stats["connected"] is not False:
+                    print(f"\nPi not answering ({type(e).__name__}) - is so101_station.py running on the Pi? "
+                          "Retrying...")
+                _stats["connected"] = False
+            nr, result = 0, None
             time.sleep(1)
             continue
         if r.status_code == 404:
-            print("\nPi odpowiada, ale ma stary ramie.py bez /yolo - wgraj: python wgraj_na_pi.py")
+            print("\nThe Pi answers but has an old program without /yolo - deploy: python deploy_to_pi.py")
             os._exit(1)
         with _lock:
-            if not _stat["polaczony"]:
-                print("Polaczono - laptop szuka butelek za Pi (gdy ramie sledzi, Pi liczy samo). "
-                      "Ctrl+C konczy.")
-                _stat["polaczony"] = True
-        nr, wynik = 0, None
-        if r.status_code != 200:  # 204: Pi nie mialo nowej klatki przez 1 s
+            if not _stats["connected"]:
+                print("Connected - searching for bottles for the Pi (while the arm tracks, the Pi computes itself). "
+                      "Ctrl+C ends.")
+                _stats["connected"] = True
+        nr, result = 0, None
+        if r.status_code != 200:  # 204: the Pi had no new frame for 1 s
             continue
-        klatka = cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_COLOR)
-        if klatka is None:
+        frame = cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_COLOR)
+        if frame is None:
             continue
         t = time.perf_counter()
-        wynik = [{k: b[k] for k in POLA} for b in detektor.wykryj(klatka)]
+        result = [{k: b[k] for k in FIELDS} for b in detector.detect(frame)]
         nr = int(r.headers.get("X-Nr", 0))
         with _lock:
-            _stat["n"] += 1
-            _stat["yolo"] += time.perf_counter() - t
-            _stat["widze"] = wynik
+            _stats["n"] += 1
+            _stats["yolo"] += time.perf_counter() - t
+            _stats["seen"] = result
 
 
 def main():
-    ramie.YOLO_PRZEPLOT = False  # laptop zdazy obie skale (320 + 640) w kazdej klatce - pewniejsze wykrycie
-    detektor = ramie.DetektorButelek()  # jedna siec dla obu watkow (onnxruntime na to pozwala)
-    print(f"Lacze sie z {PI} ...")
-    for _ in range(WATKI):
-        threading.Thread(target=watek, args=(detektor,), daemon=True).start()
-    t_stat = time.time()
+    so101_station.YOLO_INTERLEAVE = False  # the worker has time for both scales (320 + 640) every frame - surer
+    detector = so101_station.BottleDetector()  # one network for both threads (onnxruntime allows it)
+    print(f"Connecting to {PI} ...")
+    for _ in range(THREADS):
+        threading.Thread(target=worker, args=(detector,), daemon=True).start()
+    t_stats = time.time()
     while True:
         time.sleep(2.0)
         with _lock:
-            n, czas, widze = _stat["n"], _stat["yolo"], _stat["widze"]
-            _stat["n"], _stat["yolo"] = 0, 0.0
+            n, elapsed, seen = _stats["n"], _stats["yolo"], _stats["seen"]
+            _stats["n"], _stats["yolo"] = 0, 0.0
         if n:
-            opis = ", ".join("%s %.0f%%" % (b["klasa"], b["pewnosc"] * 100) for b in widze) or "-"
-            print(f"\r{n / (time.time() - t_stat):5.1f} kl/s | YOLO {czas / n * 1000:4.0f} ms | widze: {opis:40s}",
+            text = ", ".join("%s %.0f%%" % (b["cls"], b["conf"] * 100) for b in seen) or "-"
+            print(f"\r{n / (time.time() - t_stats):5.1f} fps | YOLO {elapsed / n * 1000:4.0f} ms | seen: {text:40s}",
                   end="", flush=True)
-        t_stat = time.time()
+        t_stats = time.time()
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nKoniec - Pi liczy YOLO samo.")
+        print("\nStopped - the Pi runs YOLO itself.")

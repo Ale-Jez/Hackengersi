@@ -49,7 +49,7 @@
 | Problem | Solution |
 |---------|----------|
 | "only N points seen, need 4+" | Tag not visible from enough positions. Move the `look` pose higher, or check tag placement on gripper. |
-| High calibration error (> 25 mm) | Bottle may have moved during calibration. Ensure stable surface. Re-run `python butelki.py kalibruj`. |
+| High calibration error (> 25 mm) | Re-run `python roarm_pick.py calibrate tag` with the tag clean (no glare) and fully in view. |
 | Pick misses by 2+ cm | Recalibrate. The layout may have shifted since last calibration. |
 | Homography not saved | Check file permissions on `config.json`. |
 

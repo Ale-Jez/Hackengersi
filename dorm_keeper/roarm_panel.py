@@ -1,73 +1,71 @@
-"""Panel RoArma w przegladarce: http://<pi>:8765/roarm_panel (serwuje ramie.py).
+"""RoArm panel in the browser: http://<pi>:8765/roarm_panel (served by so101_station.py).
 
-Sterowanie przytrzymaniem (puszczasz = stoi), obraz z kamery SO-101 obok, ochrona serw:
-wolne male kroki, limity zasiegu i wysokosci, podglad obciazen, STOP przy przeciazeniu.
-Stad tez: nauka chwytu + samokalibracja (butelki.py kalibruj gotowe) i start/stop zbierania butelek.
+Hold-to-move control (release = stop), the SO-101 camera image next to it, servo protection:
+slow small steps, reach and height limits, load display, STOP on overload. It never drives to a fixed pose.
 """
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
 
 import requests
 
-_katalog = os.path.dirname(os.path.abspath(__file__))
+_dir = os.path.dirname(os.path.abspath(__file__))
 
-PREDKOSCI = {"wolno": (20.0, 0.12), "normalnie": (40.0, 0.2), "szybko": (60.0, 0.25)}  # (mm/s, spd firmware <=0.25)
-WYPRZEDZENIE = 0.6               # s: cel jest tyle ruchu przed ramieniem -> jedzie rowno, zamiast krok-stop-krok
-PODNIES_MM = 100.0               # P: chwyc i podnies o tyle
-SERWO_GORACE = (60, 65)          # st. C: od 65 jazda zablokowana (serwo odpoczywa), od 60 w dol znowu wolno
-SERWA_ROARM = ["podstawa", "bark 1", "bark 2", "lokiec", "nadgarstek", "obrot", "chwytak"]  # kolejnosc "temp" z /ws
-Z_ZAKRES = (-150.0, 350.0)       # mm (RoArm do gory nogami: odwrocony, patrz _konfig)
-OBCIAZENIE_STOP = 350            # |obciazenie| barku/lokcia (jednostki firmware): ponad = STOP i trzymaj
-PODTRZYMANIE = 0.35              # s: bez sygnalu z przegladarki ramie staje (puszczony przycisk, zerwane WiFi)
-# ruch po ludzku (wzgledem podstawy RoArma): obrot calej podstawy, wysuniecie od podstawy, wysokosc, chwytak
-KIERUNKI = {"obrot+": ("obrot", 1), "obrot-": ("obrot", -1), "wysun": ("zasieg", 1), "cofnij": ("zasieg", -1),
-            "z+": ("z", 1), "z-": ("z", -1), "t+": ("t", 1), "t-": ("t", -1), "r+": ("r", 1), "r-": ("r", -1)}
-# pojedyncze stawy (T:101): jeden przycisk = jeden staw, zadne inne sie nie ruszaja
-STAWY = {1: ("b", "podstawa"), 2: ("s", "bark"), 3: ("e", "lokiec"), 4: ("t", "nadgarstek"), 5: ("r", "obrot"),
-         6: ("g", "chwytak")}
-KIERUNKI.update({f"j{n}{z}": ("staw", n if z == "+" else -n) for n in STAWY for z in "+-"})
-STAW_RAD_S = {"wolno": 0.15, "normalnie": 0.3, "szybko": 0.5}  # rad/s
-
-
-def _konfig():
-    sys.path.append(_katalog)
-    import butelki
-
-    return butelki.wczytaj()
+SPEEDS = {"slow": (20.0, 0.12), "normal": (40.0, 0.2), "fast": (60.0, 0.25)}  # (mm/s, firmware spd <=0.25)
+LEAD = 0.6                       # s: the target is this much motion ahead of the arm -> smooth, not step-stop-step
+LIFT_MM = 100.0                  # P: grab and lift by this much
+SERVO_HOT = (60, 65)             # deg C: from 65 motion is blocked (servo rests), from 60 down it may move again
+ROARM_SERVOS = ["base", "shoulder 1", "shoulder 2", "elbow", "wrist", "roll", "gripper"]  # order of "temp" in /ws
+Z_RANGE = (-150.0, 350.0)        # mm (RoArm upside down: upside_down, see _config)
+LOAD_STOP = 350                  # |shoulder/elbow load| (firmware units): above = STOP and hold
+KEEPALIVE = 0.35                 # s: no signal from the browser -> the arm stops (button released, WiFi dropped)
+# human moves (relative to the RoArm base): turn the whole base, reach out from the base, height, gripper
+DIRECTIONS = {"turn+": ("turn", 1), "turn-": ("turn", -1), "reach+": ("reach", 1), "reach-": ("reach", -1),
+              "z+": ("z", 1), "z-": ("z", -1), "t+": ("t", 1), "t-": ("t", -1), "r+": ("r", 1), "r-": ("r", -1)}
+# single joints (T:101): one button = one joint, no other joint moves
+JOINTS = {1: ("b", "base"), 2: ("s", "shoulder"), 3: ("e", "elbow"), 4: ("t", "wrist"), 5: ("r", "roll"),
+          6: ("g", "gripper")}
+DIRECTIONS.update({f"j{n}{z}": ("joint", n if z == "+" else -n) for n in JOINTS for z in "+-"})
+JOINT_RAD_S = {"slow": 0.15, "normal": 0.3, "fast": 0.5}  # rad/s
+COMMANDS = ("stop", "open", "close", "toggle", "lift")
 
 
-class PanelRoArma:
+def _config():
+    sys.path.append(_dir)
+    import roarm_pick
+
+    return roarm_pick.load_config()
+
+
+class RoArmPanel:
     def __init__(self):
-        cfg = _konfig()
-        self.ip, self.zasieg = cfg["roarm_ip"], cfg["zasieg_mm"]
-        self.otw, self.zam = cfg["chwyt_otwarty"], cfg["chwyt_zamkniety"]
-        self.gora = -1 if cfg.get("odwrocony") else 1  # RoArm do gory nogami: "w gore" = -z RoArma
-        self.cel = None           # cel sterowania x y z t r (od pierwszego odczytu)
-        self.t_cmd = self.r_cmd = 0.0  # zapamietane pochylenie i obrot chwytaka (zmieniaja je tylko J/L i U/O)
-        self.t_ruch = 0.0
-        self.bez_momentu = True   # dopoki nie wiadomo - bez jazdy
-        self.g = self.otw
-        self.kier, self.kier_t = None, 0.0
-        self.predkosc = "normalnie"
-        self.stan = {"polaczony": False, "komunikat": "lacze sie z RoArmem..."}
-        self.polecenia = []       # jednorazowe: chwytak, stop
-        self.proces, self.proces_nazwa, self.log = None, "", []
+        cfg = _config()
+        self.ip, self.reach = cfg["roarm_ip"], cfg["reach_mm"]
+        self.opened, self.closed = cfg["grip_open"], cfg["grip_closed"]
+        self.up = -1 if cfg.get("upside_down") else 1  # RoArm upside down: world "up" = -z of the RoArm
+        self.target = None        # control target x y z t r (from the first reading)
+        self.t_cmd = self.r_cmd = 0.0  # remembered gripper tilt and roll (only J/L and U/O change them)
+        self.t_move = 0.0
+        self.no_torque = True     # until we know - no motion
+        self.g = self.opened
+        self.dir, self.dir_t = None, 0.0
+        self.speed = "normal"
+        self.state = {"connected": False, "message": "connecting to the RoArm..."}
+        self.commands = []        # one-shot: gripper, stop
         self._lock = threading.Lock()
-        self.goracy = False
-        threading.Thread(target=self._petla, daemon=True).start()
+        self.hot = False
+        threading.Thread(target=self._loop, daemon=True).start()
         threading.Thread(target=self._websocket, daemon=True).start()
 
     def _websocket(self):
-        """Temperatury 7 serw (T:1051 "temp", ~1.5/s) i alarmy (T:-15: przeciazenie, przegrzanie, napiecie)
-        z WebSocketu RoArma - te same dane, z ktorych ostrzega jego wlasna strona."""
+        """Temperatures of the 7 servos (T:1051 "temp", ~1.5/s) and alarms (T:-15: overload, overheat, voltage)
+        from the RoArm WebSocket - the same data its own web page warns from."""
         try:
             import websocket
         except ImportError:
-            self.stan["serwa"] = "brak biblioteki websocket-client (pip install websocket-client)"
+            self.state["servos"] = "websocket-client missing (pip install websocket-client)"
             return
         while True:
             try:
@@ -75,23 +73,23 @@ class PanelRoArma:
                 while True:
                     d = json.loads(ws.recv())
                     if d.get("T") == 1051:
-                        self._temperatury(d)
+                        self._temperatures(d)
                     elif d.get("T") == -15:
-                        self.stan["alarmy"] = {"przeciazenie": bool(d.get("Stalltor")),
-                                               "przegrzanie": bool(d.get("Stalltep")),
-                                               "napiecie": {1: "za wysokie", 2: "za niskie"}.get(d.get("Stallvol"))}
-            except Exception:  # RoArm wylaczony / restart - probuj dalej
-                self.stan.pop("temp_serw", None)
+                        self.state["alarms"] = {"overload": bool(d.get("Stalltor")),
+                                                "overheat": bool(d.get("Stalltep")),
+                                                "voltage": {1: "too high", 2: "too low"}.get(d.get("Stallvol"))}
+            except Exception:  # RoArm off / rebooting - keep trying
+                self.state.pop("servo_temps", None)
                 time.sleep(2)
 
-    def _temperatury(self, d):
-        """T:1051 "temp" -> stan + blokada przegrzania. Z /ws (WiFi) albo z /js (USB przez roarm_usb.py - bez /ws)."""
+    def _temperatures(self, d):
+        """T:1051 "temp" -> state + overheat lock. From /ws (WiFi) or from /js (USB via roarm_usb.py - no /ws)."""
         temp = d.get("temp")
         if isinstance(temp, list) and temp:
-            self.stan["temp_serw"] = dict(zip(SERWA_ROARM, temp))
-            self.stan["temp_t"] = time.time()
-            najw = max(temp)
-            self.goracy = najw >= SERWO_GORACE[1] or (self.goracy and najw > SERWO_GORACE[0])
+            self.state["servo_temps"] = dict(zip(ROARM_SERVOS, temp))
+            self.state["temp_t"] = time.time()
+            hottest = max(temp)
+            self.hot = hottest >= SERVO_HOT[1] or (self.hot and hottest > SERVO_HOT[0])
 
     # ------------------------------------------------------------------ RoArm
     def _js(self, cmd, timeout=1.5):
@@ -99,377 +97,321 @@ class PanelRoArma:
                          timeout=timeout)
         return r.text
 
-    def _gdzie(self):
+    def _where(self):
         d = json.loads(self._js({"T": 105}))
         if d.get("T") != 1051 or d.get("x") is None:
-            raise RuntimeError("RoArm nie podaje pozycji (zasilanie serw?)")
-        self._temperatury(d)
+            raise RuntimeError("the RoArm reports no position (servo power?)")
+        self._temperatures(d)
         return d
 
-    def _jedz(self, cel, spd=0.2):
-        try:  # RoArm nie odpowiada, dopoki jedzie - polecenie i tak doszlo
-            self._js({"T": 104, "x": round(cel["x"], 1), "y": round(cel["y"], 1), "z": round(cel["z"], 1),
-                      "t": round(cel["t"], 3), "r": round(cel["r"], 3), "g": round(self.g, 3), "spd": spd})
+    def _go(self, target, spd=0.2):
+        try:  # the RoArm does not answer while it moves - the command arrived anyway
+            self._js({"T": 104, "x": round(target["x"], 1), "y": round(target["y"], 1), "z": round(target["z"], 1),
+                      "t": round(target["t"], 3), "r": round(target["r"], 3), "g": round(self.g, 3), "spd": spd})
         except requests.Timeout:
             pass
 
-    def _przed_ramieniem(self, d, dt):
-        """Nowy cel. Polozenie: WYPRZEDZENIE s ruchu przed obecna pozycja (jedzie rowno). Kat i obrot chwytaka:
-        zapamietane (t_cmd, r_cmd) - jak hak dzwigu w SO-101: gora/dol/dalej/blizej nie zmieniaja pochylenia."""
+    def _ahead_of_arm(self, d, dt):
+        """New target. Position: LEAD s of motion ahead of the current position (smooth). Gripper tilt and roll:
+        remembered (t_cmd, r_cmd) - like the crane hook on the SO-101: up/down/out/in do not change the tilt."""
         import math
 
-        os_, znak = KIERUNKI[self.kier]
-        v = PREDKOSCI[self.predkosc][0]
-        if os_ in ("t", "r"):  # pochyl / obroc chwytak w miejscu: polozenie = ostatni cel
-            katowa = v * 0.012  # rad/s: ~0.5 rad/s przy "normalnie"
-            if os_ == "t":
-                self.t_cmd = min(max(self.t_cmd + znak * katowa * dt, -3.14), 3.14)
+        axis, sign = DIRECTIONS[self.dir]
+        v = SPEEDS[self.speed][0]
+        if axis in ("t", "r"):  # tilt / roll the gripper in place: position = last target
+            angular = v * 0.012  # rad/s: ~0.5 rad/s at "normal"
+            if axis == "t":
+                self.t_cmd = min(max(self.t_cmd + sign * angular * dt, -3.14), 3.14)
             else:
-                self.r_cmd = min(max(self.r_cmd + znak * katowa * dt, -3.14), 3.14)
-            return dict(self.cel, t=self.t_cmd, r=self.r_cmd)
-        v *= WYPRZEDZENIE  # mm przed ramieniem
-        rho, kat, z = math.hypot(d["x"], d["y"]), math.atan2(d["y"], d["x"]), d["z"]
-        if os_ == "zasieg":
-            rho += znak * v
-        elif os_ == "obrot":
-            kat += znak * v / max(rho, 100.0)
+                self.r_cmd = min(max(self.r_cmd + sign * angular * dt, -3.14), 3.14)
+            return dict(self.target, t=self.t_cmd, r=self.r_cmd)
+        v *= LEAD  # mm ahead of the arm
+        rho, angle, z = math.hypot(d["x"], d["y"]), math.atan2(d["y"], d["x"]), d["z"]
+        if axis == "reach":
+            rho += sign * v
+        elif axis == "turn":
+            angle += sign * v / max(rho, 100.0)
         else:
-            z += znak * v * self.gora  # z+ = w gore w swiecie (do gory nogami: -z RoArma)
-        return self._ogranicz({"x": rho * math.cos(kat), "y": rho * math.sin(kat), "z": z,
-                               "t": self.t_cmd, "r": self.r_cmd})
+            z += sign * v * self.up  # z+ = up in the world (upside down: -z of the RoArm)
+        return self._clamp({"x": rho * math.cos(angle), "y": rho * math.sin(angle), "z": z,
+                            "t": self.t_cmd, "r": self.r_cmd})
 
-    def _trzymaj(self, d, komunikat):
-        self.cel = {"x": d["x"], "y": d["y"], "z": d["z"], "t": self.t_cmd, "r": self.r_cmd}
-        self._jedz(self.cel)
-        self.kier = None
-        self.stan["komunikat"] = komunikat
+    def _hold(self, d, message):
+        self.target = {"x": d["x"], "y": d["y"], "z": d["z"], "t": self.t_cmd, "r": self.r_cmd}
+        self._go(self.target)
+        self.dir = None
+        self.state["message"] = message
 
-    def _moment_tutaj(self, d):
-        """Serwa bez momentu (ramie przestawione recznie): cel kazdego serwa = jego zmierzony kat, potem moment wl.
-        Ramie zostaje, gdzie jest - zadnej stalej pozy (tam moze juz cos stac, np. pojazd)."""
+    def _torque_here(self, d):
+        """Servos without torque (arm moved by hand): each servo's goal = its measured angle, then torque on.
+        The arm stays where it is - no fixed pose (something may stand there, e.g. the vehicle)."""
         self._js({"T": 102, "base": d["b"], "shoulder": d["s"], "elbow": d["e"], "wrist": d["t"], "roll": d["r"],
                   "hand": d["g"], "spd": 50, "acc": 10})
-        self._js({"T": 210, "cmd": 1})  # tylko EnableTorque (cmd 0 najpierw jedzie do stalej pozy!)
-        self.cel = {"x": d["x"], "y": d["y"], "z": d["z"], "t": d["tit"], "r": d.get("r", 0.0)}
+        self._js({"T": 210, "cmd": 1})  # EnableTorque only (cmd 0 first drives to a fixed pose!)
+        self.target = {"x": d["x"], "y": d["y"], "z": d["z"], "t": d["tit"], "r": d.get("r", 0.0)}
         self.t_cmd, self.r_cmd, self.g = d["tit"], d.get("r", 0.0), d["g"]
-        self.bez_momentu = False
-        self.stan["komunikat"] = "silniki wlaczone tutaj - przytrzymaj przycisk, zeby jechac"
+        self.no_torque = False
+        self.state["message"] = "motors on here - hold a button to move"
 
-    def _staw(self, d):
-        """Jeden staw o predkosc * WYPRZEDZENIE przed zmierzonym katem (T:101 - tylko ten staw)."""
-        n = abs(KIERUNKI[self.kier][1])
-        znak = 1 if KIERUNKI[self.kier][1] > 0 else -1
-        w = STAW_RAD_S[self.predkosc]
-        rad = d[STAWY[n][0]] + znak * w * WYPRZEDZENIE
+    def _joint(self, d):
+        """One joint, speed * LEAD ahead of its measured angle (T:101 - only this joint)."""
+        n = abs(DIRECTIONS[self.dir][1])
+        sign = 1 if DIRECTIONS[self.dir][1] > 0 else -1
+        w = JOINT_RAD_S[self.speed]
+        rad = d[JOINTS[n][0]] + sign * w * LEAD
         try:
             self._js({"T": 101, "joint": n, "rad": round(rad, 3), "spd": int(w * 4096 / 6.283), "acc": 10})
         except requests.Timeout:
             pass
-        # tryb "jak SO-101" startuje potem od tego, gdzie ramie naprawde jest
-        self.cel = {"x": d["x"], "y": d["y"], "z": d["z"], "t": d["tit"], "r": d.get("r", 0.0)}
+        # the "like the SO-101" mode then starts from where the arm really is
+        self.target = {"x": d["x"], "y": d["y"], "z": d["z"], "t": d["tit"], "r": d.get("r", 0.0)}
         self.t_cmd, self.r_cmd = d["tit"], d.get("r", 0.0)
         if n == 6:
             self.g = rad
-        self.stan["komunikat"] = f"{STAWY[n][1]} {'+' if znak > 0 else '-'}"
+        self.state["message"] = f"{JOINTS[n][1]} {'+' if sign > 0 else '-'}"
 
-    def _chwytak(self, zamknij):
-        self.g = self.zam if zamknij else self.otw
+    def _gripper(self, close):
+        self.g = self.closed if close else self.opened
         try:
             self._js({"T": 106, "cmd": self.g, "spd": 0, "acc": 0})
         except requests.Timeout:
             pass
-        self.stan["komunikat"] = "chwytak zamkniety (chwyta)" if zamknij else "chwytak otwarty (puscil)"
+        self.state["message"] = "gripper closed (grabbing)" if close else "gripper open (released)"
 
-    def _ogranicz(self, c):
+    def _clamp(self, c):
         import math
 
-        lo, hi = self.zasieg
+        lo, hi = self.reach
         r = math.hypot(c["x"], c["y"])
         if r > hi or r < lo:
             k = (hi if r > hi else lo) / max(r, 1e-6)
             c["x"], c["y"] = c["x"] * k, c["y"] * k
-        lo, hi = Z_ZAKRES if self.gora > 0 else (-Z_ZAKRES[1], 550.0)  # podwieszony: w dol = +z, dalej niz 350
+        lo, hi = Z_RANGE if self.up > 0 else (-Z_RANGE[1], 550.0)  # hanging: down = +z, further than 350
         c["z"] = min(max(c["z"], lo), hi)
         c["t"] = min(max(c["t"], -3.14), 3.14)
         c["r"] = min(max(c["r"], -3.14), 3.14)
         return c
 
-    def _petla(self):
-        t_odczyt = 0.0
+    def _loop(self):
+        t_read = 0.0
         while True:
             time.sleep(0.05)
-            teraz = time.time()
-            if self.proces and self.proces.poll() is None:
-                continue  # kalibracja / zbieranie steruje RoArmem - panel nie przeszkadza
+            now = time.time()
             try:
-                jedzie = bool(self.kier) and teraz - self.kier_t < PODTRZYMANIE and not self.bez_momentu \
-                    and not self.goracy
-                if self.cel is None or teraz - t_odczyt > (0.2 if jedzie else 0.6):
-                    d = self._gdzie()
-                    t_odczyt = time.time()
-                    self.stan.update(polaczony=True, x=d["x"], y=d["y"], z=d["z"], t=d["tit"], r=d.get("r", 0.0),
-                                     g=d.get("g"), bark=d.get("tS", 0), lokiec=d.get("tE", 0), podstawa=d.get("tB", 0))
-                    # wszystkie obciazenia 0 = serwa bez momentu: katy z odczytu bywaja wtedy falszywe (+-pi),
-                    # a ruch "wzgledem nich" potrafi obrocic cale ramie - dlatego najpierw _moment_tutaj
-                    # torswitch* = moment wl. (firmware); obciazenia zawodza, gdy ramie wisi (grawitacja wzdluz)
+                moving = bool(self.dir) and now - self.dir_t < KEEPALIVE and not self.no_torque and not self.hot
+                if self.target is None or now - t_read > (0.2 if moving else 0.6):
+                    d = self._where()
+                    t_read = time.time()
+                    self.state.update(connected=True, x=d["x"], y=d["y"], z=d["z"], t=d["tit"], r=d.get("r", 0.0),
+                                      g=d.get("g"), shoulder_load=d.get("tS", 0), elbow_load=d.get("tE", 0),
+                                      base_load=d.get("tB", 0))
+                    # all loads 0 = servos without torque: the angles read then can be false (+-pi), and a move
+                    # "relative to them" can swing the whole arm - hence _torque_here first.
+                    # torswitch* = torque on (firmware); loads fail when the arm hangs (gravity along the links)
                     if "torswitchS" in d:
-                        self.bez_momentu = not any(d.get(k) for k in ("torswitchB", "torswitchS", "torswitchE"))
+                        self.no_torque = not any(d.get(k) for k in ("torswitchB", "torswitchS", "torswitchE"))
                     else:
-                        self.bez_momentu = not any(d.get(k) for k in ("tB", "tS", "tE", "tT", "tR"))
-                    if self.cel is None:  # tylko zapamietaj - zadnego ruchu przy polaczeniu
-                        self.cel = {"x": d["x"], "y": d["y"], "z": d["z"], "t": d["tit"], "r": d.get("r", 0.0)}
+                        self.no_torque = not any(d.get(k) for k in ("tB", "tS", "tE", "tT", "tR"))
+                    if self.target is None:  # just remember - no motion on connect
+                        self.target = {"x": d["x"], "y": d["y"], "z": d["z"], "t": d["tit"], "r": d.get("r", 0.0)}
                         self.t_cmd, self.r_cmd = d["tit"], d.get("r", 0.0)
                         if 1.0 <= (d.get("g") or 0) <= 3.5:
-                            self.g = d["g"]  # chwytak zostaje, jak jest (inaczej pierwszy ruch by go otworzyl)
-                        self.stan["komunikat"] = ("serwa bez momentu - pierwszy przycisk ruchu wlaczy je w miejscu" if self.bez_momentu
-                                                  else "gotowy - przytrzymaj przycisk, zeby jechac")
-                    elif max(abs(d.get("tS", 0)), abs(d.get("tE", 0))) > OBCIAZENIE_STOP:
-                        self._trzymaj(d, "PRZECIAZENIE - ramie trzyma pozycje. Podnies je wyzej / blizej podstawy")
-                        jedzie = False
-                    if jedzie:  # cel stale ~0.6 s przed ramieniem: jedzie rowno; puszczony przycisk = staje 1-3 cm dalej
-                        dt, self.t_ruch = min(max(t_odczyt - self.t_ruch, 0.05), 0.4), t_odczyt
-                        if self.kier.startswith("j"):
-                            self._staw(d)
+                            self.g = d["g"]  # the gripper stays as it is (else the first move would open it)
+                        self.state["message"] = ("servos without torque - the first move button enables them in place"
+                                                 if self.no_torque else "ready - hold a button to move")
+                    elif max(abs(d.get("tS", 0)), abs(d.get("tE", 0))) > LOAD_STOP:
+                        self._hold(d, "OVERLOAD - the arm holds its position. Move it higher / closer to the base")
+                        moving = False
+                    if moving:  # target always ~0.6 s ahead: smooth motion; released button = stops 1-3 cm later
+                        dt, self.t_move = min(max(t_read - self.t_move, 0.05), 0.4), t_read
+                        if self.dir.startswith("j"):
+                            self._joint(d)
                         else:
-                            self.cel = self._przed_ramieniem(d, dt)
-                            self._jedz(self.cel, spd=PREDKOSCI[self.predkosc][1])
-                            self.stan["komunikat"] = "jade"
+                            self.target = self._ahead_of_arm(d, dt)
+                            self._go(self.target, spd=SPEEDS[self.speed][1])
+                            self.state["message"] = "moving"
                 with self._lock:
-                    polecenia, self.polecenia = self.polecenia, []
-                for p in polecenia:
-                    if p == "stop":
-                        if self.bez_momentu:  # falszywe katy - nie wysylaj "trzymaj tutaj"
-                            self.kier, self.stan["komunikat"] = None, "STOP"
+                    commands, self.commands = self.commands, []
+                for c in commands:
+                    if c == "stop":
+                        if self.no_torque:  # false angles - do not send "hold here"
+                            self.dir, self.state["message"] = None, "STOP"
                         else:
-                            self._trzymaj(self._gdzie(), "STOP - trzyma pozycje")
-                    elif p in ("otworz", "zamknij", "przelacz"):  # przelacz = SPACJA: chwyc / pusc (jak w SO-101)
-                        zamknij = p == "zamknij" or (p == "przelacz" and self.g < (self.otw + self.zam) / 2)
-                        self._chwytak(zamknij)
-                    elif p == "podnies" and not self.bez_momentu:  # P: chwyc i podnies o 10 cm
-                        self._chwytak(True)
-                        time.sleep(0.8)  # palce sie zamykaja (brak czujnika na chwytaku)
-                        d = self._gdzie()
-                        self.cel = self._ogranicz({"x": d["x"], "y": d["y"], "z": d["z"] + PODNIES_MM,
+                            self._hold(self._where(), "STOP - holding position")
+                    elif c in ("open", "close", "toggle"):  # toggle = SPACE: grab / release (like the SO-101)
+                        close = c == "close" or (c == "toggle" and self.g < (self.opened + self.closed) / 2)
+                        self._gripper(close)
+                    elif c == "lift" and not self.no_torque:  # P: grab and lift by 10 cm
+                        self._gripper(True)
+                        time.sleep(0.8)  # the fingers close (no sensor on the gripper)
+                        d = self._where()
+                        self.target = self._clamp({"x": d["x"], "y": d["y"], "z": d["z"] + self.up * LIFT_MM,
                                                    "t": self.t_cmd, "r": self.r_cmd})
-                        self._jedz(self.cel, spd=PREDKOSCI["wolno"][1])
-                        self.stan["komunikat"] = f"chwycil i podnosi o {PODNIES_MM:.0f} mm"
-                if self.kier and self.goracy:
-                    self.kier = None
-                    najw = max((self.stan.get("temp_serw") or {"?": 0}).items(), key=lambda kv: kv[1])
-                    self.stan["komunikat"] = (f"SERWO GORACE ({najw[0]} {najw[1]} C) - jazda zablokowana do "
-                                              f"{SERWO_GORACE[0]} C. Nizej / blizej podstawy odciaza bark")
-                elif self.kier and self.bez_momentu:
-                    self._moment_tutaj(self._gdzie())  # nastepny obieg juz jedzie
-                elif self.kier and teraz - self.kier_t >= PODTRZYMANIE:
-                    self.kier = None  # puszczony przycisk: bez nowych celow ramie dojezdza do ostatniego i stoi
-                    self.stan["komunikat"] = "stoi"
+                        self._go(self.target, spd=SPEEDS["slow"][1])
+                        self.state["message"] = f"grabbed, lifting by {LIFT_MM:.0f} mm"
+                if self.dir and self.hot:
+                    self.dir = None
+                    hottest = max((self.state.get("servo_temps") or {"?": 0}).items(), key=lambda kv: kv[1])
+                    self.state["message"] = (f"SERVO HOT ({hottest[0]} {hottest[1]} C) - motion blocked until "
+                                             f"{SERVO_HOT[0]} C. Lower / closer to the base relieves the shoulder")
+                elif self.dir and self.no_torque:
+                    self._torque_here(self._where())  # the next cycle already moves
+                elif self.dir and now - self.dir_t >= KEEPALIVE:
+                    self.dir = None  # button released: no new targets, the arm reaches the last one and stops
+                    self.state["message"] = "stopped"
             except (requests.RequestException, RuntimeError, ValueError) as e:
-                self.stan.update(polaczony=False, komunikat=f"RoArm nie odpowiada ({type(e).__name__}) - "
-                                                             "zasilanie 7.4-8.4 V? WiFi?")
-                self.cel = None
+                self.state.update(connected=False, message=f"RoArm not answering ({type(e).__name__}) - "
+                                                           "servo power? USB/WiFi?")
+                self.target = None
                 time.sleep(1.0)
 
-    # ------------------------------------------------------------------ butelki.py (kalibracja / zbieranie)
-    def uruchom(self, nazwa, argumenty):
-        if self.proces and self.proces.poll() is None:
-            return False
-        self.kier = None
-        env = dict(os.environ, SO101_URL="http://localhost:8765", PYTHONUNBUFFERED="1")
-        self.proces = subprocess.Popen([sys.executable, "-u", "butelki.py", *argumenty], cwd=_katalog, env=env,
-                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                       text=True, errors="replace")
-        self.proces_nazwa, self.log = nazwa, [f"--- {nazwa} ---"]
-
-        def czytaj(p=self.proces):
-            for linia in p.stdout:
-                self.log = (self.log + [linia.rstrip()])[-200:]
-            self.log.append(f"--- koniec ({nazwa}, kod {p.wait()}) ---")
-            self.cel = None  # po procesie odczytaj pozycje od nowa
-
-        threading.Thread(target=czytaj, daemon=True).start()
-        return True
-
-    def zatrzymaj_proces(self):
-        if self.proces and self.proces.poll() is None:
-            import signal
-
-            self.proces.send_signal(signal.SIGINT)  # butelki.py konczy sie grzecznie ("Koniec.")
-            try:
-                self.proces.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.proces.kill()
-        with self._lock:
-            self.polecenia.append("stop")
-
-    def dane(self):
-        dziala = bool(self.proces and self.proces.poll() is None)
-        return dict(self.stan, predkosc=self.predkosc, proces=self.proces_nazwa if dziala else "", log=self.log[-40:],
-                    kalibracja=bool(_konfig().get("kalibracja")))
+    def data(self):
+        return dict(self.state, speed=self.speed)
 
 
 _panel = None
 
 
-def obsluz(h, sciezka, q):
-    """Obsluga /roarm_panel i /roarm/... (h = handler z ramie.py: ma _json)."""
+def handle(h, path, q):
+    """Serve /roarm_panel and /roarm/... (h = the so101_station.py request handler: has _json)."""
     global _panel
-    if sciezka == "/roarm_panel":
-        tresc = HTML.encode()
+    if path == "/roarm_panel":
+        body = HTML.encode()
         h.send_response(200)
         h.send_header("Content-Type", "text/html; charset=utf-8")
-        h.send_header("Content-Length", str(len(tresc)))
+        h.send_header("Content-Length", str(len(body)))
         h.end_headers()
-        h.wfile.write(tresc)
+        h.wfile.write(body)
         return
     if _panel is None:
-        _panel = PanelRoArma()
+        _panel = RoArmPanel()
     p = _panel
-    if sciezka == "/roarm/stan":
-        return h._json(p.dane())
-    if sciezka == "/roarm/ruch" and q.get("k") in KIERUNKI:
-        p.kier, p.kier_t = q["k"], time.time()
+    if path == "/roarm/state":
+        return h._json(p.data())
+    if path == "/roarm/move" and q.get("k") in DIRECTIONS:
+        p.dir, p.dir_t = q["k"], time.time()
         return h._json({"ok": True})
-    if sciezka == "/roarm/predkosc" and q.get("v") in PREDKOSCI:
-        p.predkosc = q["v"]
+    if path == "/roarm/speed" and q.get("v") in SPEEDS:
+        p.speed = q["v"]
         return h._json({"ok": True})
-    if sciezka == "/roarm/polecenie" and q.get("p") in ("stop", "otworz", "zamknij", "przelacz", "podnies"):
+    if path == "/roarm/command" and q.get("c") in COMMANDS:
         with p._lock:
-            p.polecenia.append(q["p"])
+            p.commands.append(q["c"])
         return h._json({"ok": True})
-    if sciezka == "/roarm/uruchom" and q.get("co") in ("kalibracja", "zbieranie"):
-        arg = ["kalibruj", "gotowe"] if q["co"] == "kalibracja" else []
-        return h._json({"ok": p.uruchom(q["co"], arg)})
-    if sciezka == "/roarm/zatrzymaj":
-        p.zatrzymaj_proces()
-        return h._json({"ok": True})
-    h._json({"blad": "nieznane polecenie panelu RoArma"}, 404)
+    h._json({"error": "unknown RoArm panel command"}, 404)
 
 
-HTML = """<!doctype html><html lang="pl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>RoArm - panel</title><style>
-:root{--tlo:#0b0f14;--panel:#121922;--linia:#243040;--tekst:#e8eef5;--przyg:#8a9aac;--akcent:#4cc2ff;--ok:#2ecc71;--zle:#ff5c5c;--uwaga:#ffb020}
-*{box-sizing:border-box}body{margin:0;background:var(--tlo);color:var(--tekst);font:15px system-ui,"Segoe UI",sans-serif}
+HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>RoArm panel</title><style>
+:root{--bg:#0b0f14;--card:#121922;--line:#243040;--text:#e8eef5;--dim:#8a9aac;--accent:#4cc2ff;--ok:#2ecc71;--bad:#ff5c5c;--warn:#ffb020}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,"Segoe UI",sans-serif}
 main{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(320px,1fr);gap:14px;padding:14px}
 @media(max-width:900px){main{grid-template-columns:1fr}}
-h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;text-transform:uppercase;letter-spacing:1px;color:var(--przyg);margin:14px 0 8px}
-.karta{background:var(--panel);border:1px solid var(--linia);border-radius:12px;padding:14px}
+h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin:14px 0 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
 img{width:100%;border-radius:10px;background:#000;display:block}
-#kom{font-weight:700;padding:10px 12px;border-radius:8px;background:#1a2330;margin:8px 0}
-#kom.zle{background:#4d1f22;color:#ffb3b3}
-.poz{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-variant-numeric:tabular-nums}
-.poz div{background:#1a2330;border-radius:8px;padding:6px 8px}.poz b{display:block;font-size:18px}.poz span{font-size:12px;color:var(--przyg)}
-.pasek{height:8px;background:#1a2330;border-radius:4px;overflow:hidden;margin:3px 0 8px}.pasek i{display:block;height:100%;background:var(--ok);width:0}
-.siatka{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
-button{font:inherit;padding:12px 6px;border:0;border-radius:8px;background:#243040;color:var(--tekst);cursor:pointer;touch-action:none;user-select:none}
-button:active,button.on{background:var(--akcent);color:#06121e}button small{display:block;font-size:11px;opacity:.7}
-#stop{background:var(--zle);font-weight:800;font-size:18px}.duzy{width:100%;margin-top:6px}
-.zielony{background:#1b5e3a}.czerwony{background:#6b2124}
-ol{margin:6px 0 0;padding-left:20px;color:var(--przyg);line-height:1.5}ol b{color:var(--tekst)}
-pre{background:#05080b;border-radius:8px;padding:8px;height:170px;overflow:auto;font-size:12px;margin:8px 0 0;white-space:pre-wrap}
-.stan .wiersz{display:grid;grid-template-columns:150px 1fr 74px;gap:8px;align-items:center;font-size:13px}
-.stan .wiersz .pasek{margin:6px 0}.stan b{text-align:right;font-variant-numeric:tabular-nums}
-#uwagi div{margin-top:6px;padding:7px 10px;border-radius:8px;background:#4d1f22;color:#ffb3b3;font-weight:700;font-size:13px}
-#uwagi div.zolte{background:#4d3a12;color:#ffd98a}
-details{margin-top:8px;font-size:13px;color:var(--przyg)}#serwa{display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;margin-top:6px;font-variant-numeric:tabular-nums}
+#msg{font-weight:700;padding:10px 12px;border-radius:8px;background:#1a2330;margin:8px 0}
+#msg.bad{background:#4d1f22;color:#ffb3b3}
+.pos{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-variant-numeric:tabular-nums}
+.pos div{background:#1a2330;border-radius:8px;padding:6px 8px}.pos b{display:block;font-size:18px}.pos span{font-size:12px;color:var(--dim)}
+.bar{height:8px;background:#1a2330;border-radius:4px;overflow:hidden;margin:3px 0 8px}.bar i{display:block;height:100%;background:var(--ok);width:0}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+button{font:inherit;padding:12px 6px;border:0;border-radius:8px;background:#243040;color:var(--text);cursor:pointer;touch-action:none;user-select:none}
+button:active,button.on{background:var(--accent);color:#06121e}button small{display:block;font-size:11px;opacity:.7}
+#stop{background:var(--bad);font-weight:800;font-size:18px}.green{background:#1b5e3a}
+.sys .row{display:grid;grid-template-columns:150px 1fr 74px;gap:8px;align-items:center;font-size:13px}
+.sys .row .bar{margin:6px 0}.sys b{text-align:right;font-variant-numeric:tabular-nums}
+#warnings div{margin-top:6px;padding:7px 10px;border-radius:8px;background:#4d1f22;color:#ffb3b3;font-weight:700;font-size:13px}
+#warnings div.yellow{background:#4d3a12;color:#ffd98a}
+details{margin-top:8px;font-size:13px;color:var(--dim)}#servos{display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;margin-top:6px;font-variant-numeric:tabular-nums}
 </style></head><body><main>
-<div><div class="karta"><h1>RoArm - sterowanie</h1><span style="color:var(--przyg)">obraz z kamery SO-101 (to, co widzi program)</span>
-<img src="/podglad?czysty=1" alt="kamera SO-101"></div>
-<div class="karta" style="margin-top:14px"><h2>Nauka chwytu i kalibracja</h2><ol>
-<li>Postaw <b>jedna butelke</b> na stole: widac jej dol na obrazie, 12-38 cm od podstawy RoArma.</li>
-<li>Otworz chwytak i najedz nim <b>na szyjke butelki</b> - dokladnie tak, jak ma ja chwytac.</li>
-<li>Kliknij <b>Gotowe</b> - RoArm sam przestawi butelke kilka razy i nauczy sie, gdzie co jest (~1.5 min).</li></ol>
-<button class="duzy zielony" id="kal">Gotowe - ucz chwytu i kalibruj</button>
-<h2>Zbieranie butelek</h2><div class="siatka" style="grid-template-columns:1fr 1fr">
-<button class="zielony" id="zb">Start zbierania</button><button class="czerwony" id="zat">Zatrzymaj</button></div>
-<pre id="log">(tu pojawi sie przebieg kalibracji / zbierania)</pre></div></div>
-<div class="karta"><div id="kom">lacze sie...</div>
-<div class="poz"><div><span>wysuniecie</span><b id="px">-</b></div><div><span>obrot podstawy</span><b id="py">-</b></div><div><span>wysokosc</span><b id="pz">-</b></div></div>
-<h2>Stan systemu</h2><div class="stan">
-<div class="wiersz"><span>Raspberry CPU</span><div class="pasek"><i id="s-cpu"></i></div><b id="t-cpu">-</b></div>
-<div class="wiersz"><span>Raspberry RAM</span><div class="pasek"><i id="s-ram"></i></div><b id="t-ram">-</b></div>
-<div class="wiersz"><span>Raspberry temp.</span><div class="pasek"><i id="s-temp"></i></div><b id="t-temp">-</b></div>
-<div class="wiersz"><span>SO-101 najcieplejsze serwo</span><div class="pasek"><i id="s-so"></i></div><b id="t-so">-</b></div>
-<div class="wiersz"><span>RoArm najcieplejsze serwo</span><div class="pasek"><i id="s-ra"></i></div><b id="t-ra">-</b></div>
-<div class="wiersz"><span>RoArm obciazenie barku</span><div class="pasek"><i id="obark"></i></div><b id="t-bark">-</b></div>
-<div class="wiersz"><span>RoArm obciazenie lokcia</span><div class="pasek"><i id="olok"></i></div><b id="t-lok">-</b></div>
-<div id="uwagi"></div><details><summary>wszystkie serwa</summary><div id="serwa"></div></details></div>
-<h2>Skad patrzysz na RoArma?</h2><div class="siatka" style="grid-template-columns:1fr 1fr">
-<button data-widok="przod">Stoje PRZED nim<small>twarza do robota</small></button><button data-widok="tyl">Stoje ZA nim<small>patrze tam, gdzie on</small></button></div>
-<h2>Stawy - kazdy przycisk rusza JEDNYM stawem (przytrzymaj)</h2><div class="siatka" style="grid-template-columns:1.3fr 1fr 1fr">
-<span>podstawa</span><button data-k="j1-">-</button><button data-k="j1+">+</button>
-<span>bark</span><button data-k="j2-">-</button><button data-k="j2+">+</button>
-<span>lokiec</span><button data-k="j3-">-</button><button data-k="j3+">+</button>
-<span>nadgarstek</span><button data-k="j4-">-</button><button data-k="j4+">+</button>
-<span>obrot chwytaka</span><button data-k="j5-">-</button><button data-k="j5+">+</button>
-<span>chwytak</span><button data-k="j6-">-</button><button data-k="j6+">+</button></div>
-<h2>Ruch - jak SO-101 (przytrzymaj, puszczasz = stoi; chwytak trzyma swoj kat jak hak dzwigu)</h2><div class="siatka">
-<button data-k="z+">GORA<small>W</small></button><button data-k="wysun">DALEJ<small>R - od podstawy</small></button><button data-l="1">LEWO<small>A</small></button>
-<button data-k="z-">DOL<small>S</small></button><button data-k="cofnij">BLIZEJ<small>F - do podstawy</small></button><button data-l="-1">PRAWO<small>D</small></button>
-<button data-k="t+">pochyl chwytak<small>J</small></button><button data-k="t-">pochyl chwytak<small>L</small></button><button id="stop">STOP<small>B</small></button>
-<button data-k="r+">obroc chwytak<small>U</small></button><button data-k="r-">obroc chwytak<small>O</small></button><span></span></div>
-<h2>Chwytak</h2><div class="siatka">
-<button data-p="przelacz">CHWYC / PUSC<small>SPACJA</small></button><button data-p="podnies" class="zielony">CHWYC I PODNIES<small>P - 10 cm w gore</small></button><button data-p="otworz">otworz<small>Z</small></button></div>
-<h2>Predkosc</h2><div class="siatka"><button data-v="wolno">1 wolno<small>celowanie</small></button><button data-v="normalnie" class="on">2 normalnie</button><button data-v="szybko">3 szybko</button></div>
+<div><div class="card"><h1>RoArm control</h1><span style="color:var(--dim)">SO-101 camera image (what the program sees)</span>
+<img src="/preview?clean=1" alt="SO-101 camera"></div></div>
+<div class="card"><div id="msg">connecting...</div>
+<div class="pos"><div><span>reach</span><b id="px">-</b></div><div><span>base angle</span><b id="py">-</b></div><div><span>height</span><b id="pz">-</b></div></div>
+<h2>System</h2><div class="sys">
+<div class="row"><span>Raspberry CPU</span><div class="bar"><i id="s-cpu"></i></div><b id="t-cpu">-</b></div>
+<div class="row"><span>Raspberry RAM</span><div class="bar"><i id="s-ram"></i></div><b id="t-ram">-</b></div>
+<div class="row"><span>Raspberry temp.</span><div class="bar"><i id="s-temp"></i></div><b id="t-temp">-</b></div>
+<div class="row"><span>SO-101 hottest servo</span><div class="bar"><i id="s-so"></i></div><b id="t-so">-</b></div>
+<div class="row"><span>RoArm hottest servo</span><div class="bar"><i id="s-ra"></i></div><b id="t-ra">-</b></div>
+<div class="row"><span>RoArm shoulder load</span><div class="bar"><i id="lshoulder"></i></div><b id="t-shoulder">-</b></div>
+<div class="row"><span>RoArm elbow load</span><div class="bar"><i id="lelbow"></i></div><b id="t-elbow">-</b></div>
+<div id="warnings"></div><details><summary>all servos</summary><div id="servos"></div></details></div>
+<h2>Where are you looking from?</h2><div class="grid" style="grid-template-columns:1fr 1fr">
+<button data-view="front">In FRONT of it<small>facing the robot</small></button><button data-view="back">BEHIND it<small>looking where it looks</small></button></div>
+<h2>Joints - each button moves ONE joint (hold)</h2><div class="grid" style="grid-template-columns:1.3fr 1fr 1fr">
+<span>base</span><button data-k="j1-">-</button><button data-k="j1+">+</button>
+<span>shoulder</span><button data-k="j2-">-</button><button data-k="j2+">+</button>
+<span>elbow</span><button data-k="j3-">-</button><button data-k="j3+">+</button>
+<span>wrist</span><button data-k="j4-">-</button><button data-k="j4+">+</button>
+<span>gripper roll</span><button data-k="j5-">-</button><button data-k="j5+">+</button>
+<span>gripper</span><button data-k="j6-">-</button><button data-k="j6+">+</button></div>
+<h2>Move - like the SO-101 (hold, release = stop; the gripper keeps its angle like a crane hook)</h2><div class="grid">
+<button data-k="z+">UP<small>W</small></button><button data-k="reach+">OUT<small>R - away from base</small></button><button data-l="1">LEFT<small>A</small></button>
+<button data-k="z-">DOWN<small>S</small></button><button data-k="reach-">IN<small>F - toward base</small></button><button data-l="-1">RIGHT<small>D</small></button>
+<button data-k="t+">tilt gripper<small>J</small></button><button data-k="t-">tilt gripper<small>L</small></button><button id="stop">STOP<small>B</small></button>
+<button data-k="r+">roll gripper<small>U</small></button><button data-k="r-">roll gripper<small>O</small></button><span></span></div>
+<h2>Gripper</h2><div class="grid">
+<button data-c="toggle">GRAB / RELEASE<small>SPACE</small></button><button data-c="lift" class="green">GRAB AND LIFT<small>P - 10 cm up</small></button><button data-c="open">open<small>Z</small></button></div>
+<h2>Speed</h2><div class="grid"><button data-v="slow">1 slow<small>aiming</small></button><button data-v="normal" class="on">2 normal</button><button data-v="fast">3 fast</button></div>
 </div></main><script>
 const $=id=>document.getElementById(id),get=u=>fetch(u).then(r=>r.json()).catch(()=>({}));
-let trzymany=null,petla=null;
-function jedz(k){if(trzymany===k)return;stoj();trzymany=k;get('/roarm/ruch?k='+encodeURIComponent(k));petla=setInterval(()=>get('/roarm/ruch?k='+encodeURIComponent(k)),120)}
-function stoj(){clearInterval(petla);petla=null;trzymany=null}
-// "w lewo" = Twoje lewo: stojac przed robotem jego lewo to Twoje prawo (obrot podstawy + = lewo robota)
-let widok='przod';try{widok=localStorage.getItem('roarm_widok')||'przod'}catch(e){}
-const lewo=znak=>(widok==='tyl'?1:-1)*znak>0?'obrot+':'obrot-';
-function ustawWidok(w){widok=w;try{localStorage.setItem('roarm_widok',w)}catch(e){}
- document.querySelectorAll('[data-widok]').forEach(b=>b.classList.toggle('on',b.dataset.widok===w))}ustawWidok(widok);
-document.querySelectorAll('[data-widok]').forEach(b=>b.onclick=()=>ustawWidok(b.dataset.widok));
-document.querySelectorAll('[data-k],[data-l]').forEach(b=>{const k=()=>b.dataset.k||lewo(+b.dataset.l);
- b.onpointerdown=e=>{b.setPointerCapture(e.pointerId);jedz(k())};b.onpointerup=b.onpointercancel=stoj});
-document.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>get('/roarm/polecenie?p='+b.dataset.p));
-document.querySelectorAll('[data-v]').forEach(b=>b.onclick=()=>predkosc(b.dataset.v));
-$('stop').onclick=()=>{stoj();get('/roarm/polecenie?p=stop')};
-$('kal').onclick=()=>{if(confirm('Chwytak jest otwarty wokol szyjki butelki? RoArm zacznie sam przestawiac butelke.'))get('/roarm/uruchom?co=kalibracja')};
-$('zb').onclick=()=>get('/roarm/uruchom?co=zbieranie');$('zat').onclick=()=>get('/roarm/zatrzymaj');
-// klawisze jak w SO-101 (ramie.py): W/S gora/dol, R/F dalej/blizej, A/D lewo/prawo, J/L pochyl, U/O obroc
-const KL={w:'z+',s:'z-',r:'wysun',f:'cofnij',j:'t+',l:'t-',u:'r+',o:'r-'};
-const PRED={'1':'wolno','2':'normalnie','3':'szybko'};
-function predkosc(v){get('/roarm/predkosc?v='+v);document.querySelectorAll('[data-v]').forEach(x=>x.classList.toggle('on',x.dataset.v===v))}
-const klawisz=k=>k==='a'?lewo(1):k==='d'?lewo(-1):KL[k];
-onkeydown=e=>{const key=e.key.toLowerCase(),k=klawisz(key);
- if(k){jedz(k);e.preventDefault()}
- else if(key==='b'){stoj();get('/roarm/polecenie?p=stop')}
+let held=null,timer=null;
+function move(k){if(held===k)return;stop();held=k;get('/roarm/move?k='+encodeURIComponent(k));timer=setInterval(()=>get('/roarm/move?k='+encodeURIComponent(k)),120)}
+function stop(){clearInterval(timer);timer=null;held=null}
+// "left" = YOUR left: standing in front of the robot its left is your right (base turn + = robot's left)
+let view='front';try{view=localStorage.getItem('roarm_view')||'front'}catch(e){}
+const left=sign=>(view==='back'?1:-1)*sign>0?'turn+':'turn-';
+function setView(v){view=v;try{localStorage.setItem('roarm_view',v)}catch(e){}
+ document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('on',b.dataset.view===v))}setView(view);
+document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>setView(b.dataset.view));
+document.querySelectorAll('[data-k],[data-l]').forEach(b=>{const k=()=>b.dataset.k||left(+b.dataset.l);
+ b.onpointerdown=e=>{b.setPointerCapture(e.pointerId);move(k())};b.onpointerup=b.onpointercancel=stop});
+document.querySelectorAll('[data-c]').forEach(b=>b.onclick=()=>get('/roarm/command?c='+b.dataset.c));
+document.querySelectorAll('[data-v]').forEach(b=>b.onclick=()=>speed(b.dataset.v));
+$('stop').onclick=()=>{stop();get('/roarm/command?c=stop')};
+// keys like on the SO-101 (so101_station.py): W/S up/down, R/F out/in, A/D left/right, J/L tilt, U/O roll
+const KEYS={w:'z+',s:'z-',r:'reach+',f:'reach-',j:'t+',l:'t-',u:'r+',o:'r-'};
+const SPEED={'1':'slow','2':'normal','3':'fast'};
+function speed(v){get('/roarm/speed?v='+v);document.querySelectorAll('[data-v]').forEach(x=>x.classList.toggle('on',x.dataset.v===v))}
+const keyDir=k=>k==='a'?left(1):k==='d'?left(-1):KEYS[k];
+onkeydown=e=>{const key=e.key.toLowerCase(),k=keyDir(key);
+ if(k){move(k);e.preventDefault()}
+ else if(key==='b'){stop();get('/roarm/command?c=stop')}
  else if(e.repeat){}
- else if(key===' '){get('/roarm/polecenie?p=przelacz');e.preventDefault()}
- else if(key==='p')get('/roarm/polecenie?p=podnies');
- else if(key==='z')get('/roarm/polecenie?p=otworz');
- else if(key==='x')get('/roarm/polecenie?p=zamknij');
- else if(PRED[key])predkosc(PRED[key])};
-onkeyup=e=>{if(klawisz(e.key.toLowerCase())===trzymany)stoj()};onblur=stoj;
-function pasek(el,v){const p=Math.min(100,Math.abs(v||0)/350*100);el.style.width=p+'%';el.style.background=p>80?'var(--zle)':p>55?'var(--uwaga)':'var(--ok)'}
-// miernik: pasek do "max", kolor od progow zolty/czerwony, tekst obok
-function miernik(id,v,max,zolty,czerwony,tekst){const el=$('s-'+id),t=$('t-'+id);
+ else if(key===' '){get('/roarm/command?c=toggle');e.preventDefault()}
+ else if(key==='p')get('/roarm/command?c=lift');
+ else if(key==='z')get('/roarm/command?c=open');
+ else if(key==='x')get('/roarm/command?c=close');
+ else if(SPEED[key])speed(SPEED[key])};
+onkeyup=e=>{if(keyDir(e.key.toLowerCase())===held)stop()};onblur=stop;
+function bar(el,v){const p=Math.min(100,Math.abs(v||0)/350*100);el.style.width=p+'%';el.style.background=p>80?'var(--bad)':p>55?'var(--warn)':'var(--ok)'}
+// gauge: bar up to "max", colour from the yellow/red thresholds, text next to it
+function gauge(id,v,max,yellow,red,text){const el=$('s-'+id),t=$('t-'+id);
  if(v==null||isNaN(v)){el.style.width='0';t.textContent='-';return}
- el.style.width=Math.min(100,Math.max(0,v)/max*100)+'%';el.style.background=v>=czerwony?'var(--zle)':v>=zolty?'var(--uwaga)':'var(--ok)';t.textContent=tekst}
-const najcieplejsze=o=>o?Object.entries(o).reduce((a,b)=>b[1]>a[1]?b:a,['',-1]):null;
+ el.style.width=Math.min(100,Math.max(0,v)/max*100)+'%';el.style.background=v>=red?'var(--bad)':v>=yellow?'var(--warn)':'var(--ok)';t.textContent=text}
+const hottest=o=>o?Object.entries(o).reduce((a,b)=>b[1]>a[1]?b:a,['',-1]):null;
 let roarm={};
-async function odswiezSystem(){const s=await get('/system'),uw=[];
- miernik('cpu',s.cpu,100,70,90,s.cpu!=null?Math.round(s.cpu)+' %':'-');
- miernik('ram',s.ram,100,75,90,s.ram!=null?Math.round(s.ram)+' %':'-');
- miernik('temp',s.temp,90,75,82,s.temp!=null?s.temp.toFixed(0)+' C'+(s.zegar_mhz?' '+(s.zegar_mhz/1000).toFixed(1)+'GHz':''):'-');
- const so=najcieplejsze(s.so101&&s.so101.temp);miernik('so',so&&so[1],75,55,65,so&&so[1]>=0?so[1]+' C':'-');
- const ra=najcieplejsze(roarm.temp_serw);miernik('ra',ra&&ra[1],75,55,65,ra&&ra[1]>=0?ra[1]+' C':'-');
- if(s.zbija_zegar)uw.push(['Raspberry sie przegrzewa - zegar zbity (wentylator!)','']);
- if(s.niskie_napiecie)uw.push(['Raspberry: za niskie napiecie zasilacza','']);
- if(so&&so[1]>=55)uw.push(['SO-101: '+so[0]+' '+so[1]+' C',so[1]>=65?'':'zolte']);
- if(ra&&ra[1]>=55)uw.push(['RoArm: '+ra[0]+' '+ra[1]+' C'+(ra[1]>=65?' - jazda zablokowana, niech odpocznie':' - odciaz (nizej / blizej podstawy)'),ra[1]>=65?'':'zolte']);
- const al=roarm.alarmy||{};if(al.przeciazenie)uw.push(['RoArm: PRZECIAZENIE serwa (zablokowany ruch?)','']);
- if(al.przegrzanie)uw.push(['RoArm: PRZEGRZANIE serwa - wylacz i odczekaj','']);if(al.napiecie)uw.push(['RoArm: napiecie '+al.napiecie,'']);
- $('uwagi').innerHTML=uw.map(u=>`<div class="${u[1]}">${u[0]}</div>`).join('');
- const wsz=[];if(s.so101&&s.so101.temp)for(const[k,v]of Object.entries(s.so101.temp))wsz.push(`<span>SO-101 ${k}: ${v} C${s.so101.napiecie&&s.so101.napiecie[k]?' / '+s.so101.napiecie[k].toFixed(1)+' V':''}</span>`);
- if(roarm.temp_serw)for(const[k,v]of Object.entries(roarm.temp_serw))wsz.push(`<span>RoArm ${k}: ${v} C</span>`);
- $('serwa').innerHTML=wsz.join('')||'brak danych';setTimeout(odswiezSystem,1000)}odswiezSystem();
-async function odswiez(){const d=await get('/roarm/stan');if(d.x!==undefined){$('px').textContent=Math.round(Math.hypot(d.x,d.y))+' mm';$('py').textContent=Math.round(Math.atan2(d.y,d.x)*180/Math.PI)+' st.';$('pz').textContent=Math.round(d.z)+' mm'}
- roarm=d;pasek($('obark'),d.bark);pasek($('olok'),d.lokiec);
- $('t-bark').textContent=d.bark!=null?Math.abs(d.bark):'-';$('t-lok').textContent=d.lokiec!=null?Math.abs(d.lokiec):'-';
- $('kom').textContent=d.proces?('trwa: '+d.proces+' (panel wstrzymany)'):(d.komunikat||'');$('kom').className=(!d.polaczony||/PRZECIAZ/.test(d.komunikat||''))?'zle':'';
- if(d.log&&d.log.length){const l=$('log');l.textContent=d.log.join('\\n');l.scrollTop=l.scrollHeight}
- $('zb').disabled=!d.kalibracja;$('zb').title=d.kalibracja?'':'najpierw kalibracja';setTimeout(odswiez,500)}odswiez();
+async function refreshSystem(){const s=await get('/system'),w=[];
+ gauge('cpu',s.cpu,100,70,90,s.cpu!=null?Math.round(s.cpu)+' %':'-');
+ gauge('ram',s.ram,100,75,90,s.ram!=null?Math.round(s.ram)+' %':'-');
+ gauge('temp',s.temp,90,75,82,s.temp!=null?s.temp.toFixed(0)+' C'+(s.clock_mhz?' '+(s.clock_mhz/1000).toFixed(1)+'GHz':''):'-');
+ const so=hottest(s.so101&&s.so101.temp);gauge('so',so&&so[1],75,55,65,so&&so[1]>=0?so[1]+' C':'-');
+ const ra=hottest(roarm.servo_temps);gauge('ra',ra&&ra[1],75,55,65,ra&&ra[1]>=0?ra[1]+' C':'-');
+ if(s.throttled)w.push(['Raspberry overheating - clock throttled (fan!)','']);
+ if(s.undervoltage)w.push(['Raspberry: power supply voltage too low','']);
+ if(so&&so[1]>=55)w.push(['SO-101: '+so[0]+' '+so[1]+' C',so[1]>=65?'':'yellow']);
+ if(ra&&ra[1]>=55)w.push(['RoArm: '+ra[0]+' '+ra[1]+' C'+(ra[1]>=65?' - motion blocked, let it rest':' - relieve it (lower / closer to the base)'),ra[1]>=65?'':'yellow']);
+ const al=roarm.alarms||{};if(al.overload)w.push(['RoArm: servo OVERLOAD (motion blocked?)','']);
+ if(al.overheat)w.push(['RoArm: servo OVERHEAT - switch off and wait','']);if(al.voltage)w.push(['RoArm: voltage '+al.voltage,'']);
+ $('warnings').innerHTML=w.map(u=>`<div class="${u[1]}">${u[0]}</div>`).join('');
+ const all=[];if(s.so101&&s.so101.temp)for(const[k,v]of Object.entries(s.so101.temp))all.push(`<span>SO-101 ${k}: ${v} C${s.so101.voltage&&s.so101.voltage[k]?' / '+s.so101.voltage[k].toFixed(1)+' V':''}</span>`);
+ if(roarm.servo_temps)for(const[k,v]of Object.entries(roarm.servo_temps))all.push(`<span>RoArm ${k}: ${v} C</span>`);
+ $('servos').innerHTML=all.join('')||'no data';setTimeout(refreshSystem,1000)}refreshSystem();
+async function refresh(){const d=await get('/roarm/state');if(d.x!==undefined){$('px').textContent=Math.round(Math.hypot(d.x,d.y))+' mm';$('py').textContent=Math.round(Math.atan2(d.y,d.x)*180/Math.PI)+' deg';$('pz').textContent=Math.round(d.z)+' mm'}
+ roarm=d;bar($('lshoulder'),d.shoulder_load);bar($('lelbow'),d.elbow_load);
+ $('t-shoulder').textContent=d.shoulder_load!=null?Math.abs(d.shoulder_load):'-';$('t-elbow').textContent=d.elbow_load!=null?Math.abs(d.elbow_load):'-';
+ $('msg').textContent=d.message||'';$('msg').className=(!d.connected||/OVERLOAD/.test(d.message||''))?'bad':'';
+ setTimeout(refresh,500)}refresh();
 </script></body></html>"""

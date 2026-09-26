@@ -120,8 +120,7 @@ drive.py
 ├── motors.py        (CANdle wheel control)
 └── vision.py        (camera, tags, obstacles)
 
-butelki.py
-├── roarm_wifi.py    (shared with Raspberry/)
-├── ramie.py HTTP    (SO-101 via web API)
-└── camera.py        (barcode + Kaucja.pl)
+roarm_pick.py
+├── roarm_wifi.py        (shared with Raspberry/)
+└── so101_station.py HTTP (SO-101 via web API)
 ```
