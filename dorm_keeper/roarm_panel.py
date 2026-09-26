@@ -23,7 +23,6 @@ SERWA_ROARM = ["podstawa", "bark 1", "bark 2", "lokiec", "nadgarstek", "obrot", 
 Z_ZAKRES = (-150.0, 350.0)       # mm
 OBCIAZENIE_STOP = 350            # |obciazenie| barku/lokcia (jednostki firmware): ponad = STOP i trzymaj
 PODTRZYMANIE = 0.35              # s: bez sygnalu z przegladarki ramie staje (puszczony przycisk, zerwane WiFi)
-START = {"x": 235.0, "y": 0.0, "z": 234.0, "t": 0.0, "r": 0.0}  # pozycja startowa firmware (malo obciaza bark)
 # ruch po ludzku (wzgledem podstawy RoArma): obrot calej podstawy, wysuniecie od podstawy, wysokosc, chwytak
 KIERUNKI = {"obrot+": ("obrot", 1), "obrot-": ("obrot", -1), "wysun": ("zasieg", 1), "cofnij": ("zasieg", -1),
             "z+": ("z", 1), "z-": ("z", -1), "t+": ("t", 1), "t-": ("t", -1), "r+": ("r", 1), "r-": ("r", -1)}
@@ -49,7 +48,7 @@ class PanelRoArma:
         self.kier, self.kier_t = None, 0.0
         self.predkosc = "normalnie"
         self.stan = {"polaczony": False, "komunikat": "lacze sie z RoArmem..."}
-        self.polecenia = []       # jednorazowe: chwytak, start, stop
+        self.polecenia = []       # jednorazowe: chwytak, stop
         self.proces, self.proces_nazwa, self.log = None, "", []
         self._lock = threading.Lock()
         self.goracy = False
@@ -141,7 +140,7 @@ class PanelRoArma:
 
     def _moment_tutaj(self, d):
         """Serwa bez momentu (ramie przestawione recznie): cel kazdego serwa = jego zmierzony kat, potem moment wl.
-        Ramie zostaje, gdzie jest - bez jazdy do Pozycji startowej (tam moze juz cos stac)."""
+        Ramie zostaje, gdzie jest - zadnej stalej pozy (tam moze juz cos stac, np. pojazd)."""
         self._js({"T": 102, "base": d["b"], "shoulder": d["s"], "elbow": d["e"], "wrist": d["t"], "roll": d["r"],
                   "hand": d["g"], "spd": 50, "acc": 10})
         self._js({"T": 210, "cmd": 1})  # tylko EnableTorque (cmd 0 najpierw jedzie do stalej pozy!)
@@ -187,7 +186,7 @@ class PanelRoArma:
                     self.stan.update(polaczony=True, x=d["x"], y=d["y"], z=d["z"], t=d["tit"], r=d.get("r", 0.0),
                                      g=d.get("g"), bark=d.get("tS", 0), lokiec=d.get("tE", 0), podstawa=d.get("tB", 0))
                     # wszystkie obciazenia 0 = serwa bez momentu: katy z odczytu bywaja wtedy falszywe (+-pi),
-                    # a ruch "wzgledem nich" potrafi obrocic cale ramie - najpierw Pozycja startowa (bezwzgledna)
+                    # a ruch "wzgledem nich" potrafi obrocic cale ramie - dlatego najpierw _moment_tutaj
                     self.bez_momentu = not any(d.get(k) for k in ("tB", "tS", "tE", "tT", "tR"))
                     if self.cel is None:  # tylko zapamietaj - zadnego ruchu przy polaczeniu
                         self.cel = {"x": d["x"], "y": d["y"], "z": d["z"], "t": d["tit"], "r": d.get("r", 0.0)}
@@ -212,12 +211,6 @@ class PanelRoArma:
                             self.kier, self.stan["komunikat"] = None, "STOP"
                         else:
                             self._trzymaj(self._gdzie(), "STOP - trzyma pozycje")
-                    elif p == "start":
-                        self.cel = dict(START)
-                        self.t_cmd, self.r_cmd = START["t"], START["r"]
-                        self._jedz(self.cel)
-                        self.bez_momentu = False  # po tym ruchu serwa trzymaja - nastepny odczyt to potwierdzi
-                        self.stan["komunikat"] = "jade do pozycji startowej"
                     elif p in ("otworz", "zamknij", "przelacz"):  # przelacz = SPACJA: chwyc / pusc (jak w SO-101)
                         zamknij = p == "zamknij" or (p == "przelacz" and self.g < (self.otw + self.zam) / 2)
                         self._chwytak(zamknij)
@@ -233,7 +226,7 @@ class PanelRoArma:
                     self.kier = None
                     najw = max((self.stan.get("temp_serw") or {"?": 0}).items(), key=lambda kv: kv[1])
                     self.stan["komunikat"] = (f"SERWO GORACE ({najw[0]} {najw[1]} C) - jazda zablokowana do "
-                                              f"{SERWO_GORACE[0]} C. Pozycja startowa odciaza bark")
+                                              f"{SERWO_GORACE[0]} C. Nizej / blizej podstawy odciaza bark")
                 elif self.kier and self.bez_momentu:
                     self._moment_tutaj(self._gdzie())  # nastepny obieg juz jedzie
                 elif self.kier and teraz - self.kier_t >= PODTRZYMANIE:
@@ -308,7 +301,7 @@ def obsluz(h, sciezka, q):
     if sciezka == "/roarm/predkosc" and q.get("v") in PREDKOSCI:
         p.predkosc = q["v"]
         return h._json({"ok": True})
-    if sciezka == "/roarm/polecenie" and q.get("p") in ("stop", "start", "otworz", "zamknij", "przelacz", "podnies"):
+    if sciezka == "/roarm/polecenie" and q.get("p") in ("stop", "otworz", "zamknij", "przelacz", "podnies"):
         with p._lock:
             p.polecenia.append(q["p"])
         return h._json({"ok": True})
@@ -379,7 +372,6 @@ details{margin-top:8px;font-size:13px;color:var(--przyg)}#serwa{display:grid;gri
 <h2>Chwytak</h2><div class="siatka">
 <button data-p="przelacz">CHWYC / PUSC<small>SPACJA</small></button><button data-p="podnies" class="zielony">CHWYC I PODNIES<small>P - 10 cm w gore</small></button><button data-p="otworz">otworz<small>Z</small></button></div>
 <h2>Predkosc</h2><div class="siatka"><button data-v="wolno">1 wolno<small>celowanie</small></button><button data-v="normalnie" class="on">2 normalnie</button><button data-v="szybko">3 szybko</button></div>
-<button class="duzy" data-p="start">Pozycja startowa (malo obciaza serwa)</button>
 </div></main><script>
 const $=id=>document.getElementById(id),get=u=>fetch(u).then(r=>r.json()).catch(()=>({}));
 let trzymany=null,petla=null;
@@ -429,7 +421,7 @@ async function odswiezSystem(){const s=await get('/system'),uw=[];
  if(s.zbija_zegar)uw.push(['Raspberry sie przegrzewa - zegar zbity (wentylator!)','']);
  if(s.niskie_napiecie)uw.push(['Raspberry: za niskie napiecie zasilacza','']);
  if(so&&so[1]>=55)uw.push(['SO-101: '+so[0]+' '+so[1]+' C',so[1]>=65?'':'zolte']);
- if(ra&&ra[1]>=55)uw.push(['RoArm: '+ra[0]+' '+ra[1]+' C'+(ra[1]>=65?' - jazda zablokowana, niech odpocznie':' - odciaz (Pozycja startowa)'),ra[1]>=65?'':'zolte']);
+ if(ra&&ra[1]>=55)uw.push(['RoArm: '+ra[0]+' '+ra[1]+' C'+(ra[1]>=65?' - jazda zablokowana, niech odpocznie':' - odciaz (nizej / blizej podstawy)'),ra[1]>=65?'':'zolte']);
  const al=roarm.alarmy||{};if(al.przeciazenie)uw.push(['RoArm: PRZECIAZENIE serwa (zablokowany ruch?)','']);
  if(al.przegrzanie)uw.push(['RoArm: PRZEGRZANIE serwa - wylacz i odczekaj','']);if(al.napiecie)uw.push(['RoArm: napiecie '+al.napiecie,'']);
  $('uwagi').innerHTML=uw.map(u=>`<div class="${u[1]}">${u[0]}</div>`).join('');
