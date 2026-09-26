@@ -11,6 +11,9 @@ Przygotowanie (raz, ok. 2 minuty):
   - panel SO-101 (http://<pi>:8765/): kamera ma widziec stol z butelkami -> przycisk M (pozycja patrzenia)
   - python butelki.py kalibruj: postaw butelke, naprowadz na nia chwytak klawiszami (raz), reszte robi RoArm:
     sam przestawia butelke w kilka miejsc i patrzy kamera, gdzie ja widac -> przeliczenie obraz -> stol
+  - albo python butelki.py kalibruj tag: AprilTag 0 (AprilTags/) przyklejony pionowo na szczece chwytaka, przodem
+    do kamery SO-101; zmierz kal_tag_mm i kal_tag_nad_czubkiem_mm (roarm_kaucja.json). Dalej jak "kalibruj brev",
+    tylko czubek chwytaka znajduje tag zamiast VLM (bez Brev, bez sieci, powtarzalnie)
   - albo python butelki.py kalibruj brev: bez butelki i bez czlowieka. RoArm dotyka stolu (wysokosc stolu z obciazenia
     serw), potem stawia czubek chwytaka w kilku miejscach tuz nad stolem, a VLM na Brev (Qwen2.5-VL) mowi, gdzie ten
     czubek widac w obrazie SO-101 -> to samo przeliczenie obraz -> stol
@@ -20,6 +23,7 @@ Przygotowanie (raz, ok. 2 minuty):
 Sprawdzanie:
     python butelki.py gdzie        gdzie SO-101 widzi butelke i gdzie RoArm by chwytal (RoArm stoi)
     python butelki.py celuj        RoArm staje nad butelka (bez chwytania)
+    python butelki.py chwyc        RoArm chwyta butelke i podnosi ja (bez kamery/pojemnikow)
     python butelki.py punkty       punkty i kalibracja
     python butelki.py raz          jedna butelka;  python butelki.py  - bez konca (Ctrl+C konczy)
     python butelki.py --test       logika bez sprzetu (RoArm i SO-101 udawane)
@@ -69,6 +73,10 @@ DOMYSLNE = {
     "kal_brev_nad_stolem_mm": 5,  # czubek chwytaka tyle nad stolem, gdy kamera go oglada (plaszczyzna = podstawy butelek)
     "kal_brev_zgodnosc_px": 30,   # px pelnej klatki: dwie odpowiedzi VLM (dwie klatki) musza sie zgadzac, inaczej pomijam
     "kal_brev_ransac_mm": 20,     # punkt dalej niz tyle od dopasowanej homografii = zla odpowiedz VLM, odrzucony
+    # --- kalibruj tag: AprilTag 36h11 przyklejony PIONOWO na szczece chwytaka, przodem do kamery SO-101 ---
+    "kal_tag_id": 0,              # AprilTags/tag36h11_00.png
+    "kal_tag_mm": 30,             # bok czarnego kwadratu tagu (zmierz linijka po wydruku)
+    "kal_tag_nad_czubkiem_mm": 25,  # srodek tagu tyle nad czubkiem szczek (zmierz) - program przelicza na czubek
     "szyjka_nad_stolem_mm": 180,  # wysokosc chwytu nad stolem: szyjka butelki 0,5 l (~20 cm wysokosci, pod nakretka)
     "stol_start_z": 0,            # mm: stad RoArm zaczyna schodzic do stolu (musi byc nad stolem!)
     "stol_dno_z": -200,           # mm: nizej nie schodzi (twardy limit) - brak stolu do tej wysokosci = blad
@@ -429,6 +437,27 @@ def zapytaj_brev(jpg, szer, wys, cfg):
     return None if xy is None else (xy[0] * szer / w, xy[1] * wys / h)
 
 
+def znajdz_tag(jpg, szer, wys, cfg):
+    """Czubek chwytaka z AprilTaga na szczece: srodek tagu przesuniety w dol o kal_tag_nad_czubkiem_mm.
+    Skala z pionowej krawedzi samego tagu (tag stoi pionowo jak ta odleglosc, wiec skrot perspektywy sie zgadza).
+    (u, v) w pikselach klatki albo None, gdy tagu nie widac."""
+    import cv2
+    import numpy as np
+
+    obraz = cv2.imdecode(np.frombuffer(jpg, np.uint8), cv2.IMREAD_GRAYSCALE)
+    det = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11))
+    rogi, ids, _ = det.detectMarkers(obraz)
+    for r, i in zip(rogi, [] if ids is None else ids.ravel()):
+        if i != cfg["kal_tag_id"]:
+            continue
+        r = r.reshape(4, 2)  # lewy-gorny, prawy-gorny, prawy-dolny, lewy-dolny
+        pion = (np.linalg.norm(r[3] - r[0]) + np.linalg.norm(r[2] - r[1])) / 2  # px na kal_tag_mm w pionie
+        u, v = r.mean(axis=0)
+        v += cfg["kal_tag_nad_czubkiem_mm"] * pion / cfg["kal_tag_mm"]
+        return (float(u), float(v)) if 0 <= v < wys else None
+    return None
+
+
 def opis_temp(arm):
     return "temp " + ("/".join(f"{v:.0f}" for v in arm.temps.values()) + " C" if arm.temps else "?")
 
@@ -474,7 +503,7 @@ def do_stolu(arm, cfg, x, y, log=print):
     raise RuntimeError(f"nie ma stolu do z={cfg['stol_dno_z']} mm (stol nizej? stol_dno_z / stol_start_z)")
 
 
-def kalibruj_brev(arm, so, cfg, pytaj=zapytaj_brev, log=print):
+def kalibruj_brev(arm, so, cfg, pytaj=zapytaj_brev, log=print, zrodlo="brev"):
     """Samokalibracja bez butelki i bez czlowieka: RoArm stawia czubek chwytaka tuz nad stolem w kilku miejscach,
     VLM na Brev mowi, gdzie ten czubek widac w obrazie SO-101 -> homografia obraz -> stol (jak kalibruj())."""
     import cv2
@@ -537,7 +566,7 @@ def kalibruj_brev(arm, so, cfg, pytaj=zapytaj_brev, log=print):
     ch = {"z": z_stol + cfg["szyjka_nad_stolem_mm"], "t": 1.57, "r": 0.0}
     kal = {"H": H.tolist(), "stawy": stawy, "szer": widok["szer"], "wys": widok["wys"], "pary": dobre, "chwyt": ch,
            "srodek": [statistics.mean(p["x"] for p in dobre), statistics.mean(p["y"] for p in dobre)],
-           "stol_z": z_stol, "zrodlo": "brev"}
+           "stol_z": z_stol, "zrodlo": zrodlo}
     bledy = [math.hypot(*(a - b for a, b in zip(na_stol(kal, *p["px"]), (p["x"], p["y"])))) for p in dobre]
     cfg["kalibracja"] = kal
     zapisz(cfg)
@@ -820,6 +849,19 @@ def test():
         assert abs(x - 260) < 2 and abs(y - 210) < 2, (x, y)
         assert czubek_z_odpowiedzi('```json\n{"tip": [100, 50]}\n```', 896, 504) == (100.0, 50.0)
         assert czubek_z_odpowiedzi('{"tip": null}', 896, 504) is None
+
+        # AprilTag na chwytaku: tag 60x60 px na (300..360, 100..160), bok 30 mm, srodek 25 mm nad czubkiem -> czubek
+        # 50 px pod srodkiem tagu; inny tag = None
+        import cv2
+        import numpy as np
+
+        obraz = np.full((360, 640), 255, np.uint8)
+        tag = cv2.aruco.generateImageMarker(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11), 0, 60)
+        obraz[100:160, 300:360] = tag
+        jpg = cv2.imencode(".jpg", obraz)[1].tobytes()
+        u, v = znajdz_tag(jpg, 640, 360, DOMYSLNE)
+        assert abs(u - 329.5) < 2 and abs(v - (129.5 + 50)) < 3, (u, v)
+        assert znajdz_tag(jpg, 640, 360, dict(DOMYSLNE, kal_tag_id=1)) is None
         assert czubek_z_odpowiedzi('{"tip": [900, 50]}', 896, 504) is None and czubek_z_odpowiedzi("nie", 9, 9) is None
     finally:
         globals()["jedz"], globals()["zapisz"], builtins.input = orig_jedz, orig_zapisz, orig_input
@@ -849,11 +891,13 @@ def main():
         print("zapisano", sys.argv[2], cfg["punkty"][sys.argv[2]])
     elif cmd == ["idz"] and sys.argv[2:3] and punkt(cfg, sys.argv[2]):
         jedz(arm, punkt(cfg, sys.argv[2]), cfg["chwyt_otwarty"], spd=cfg["spd"])
+    elif cmd == ["kalibruj"] and sys.argv[2:3] == ["tag"]:  # jak brev, ale czubek z AprilTaga na chwytaku
+        kalibruj_brev(arm, so, cfg, pytaj=znajdz_tag, zrodlo="tag")
     elif cmd == ["kalibruj"] and sys.argv[2:3] == ["brev"]:  # bez butelki i bez czlowieka: VLM na Brev
         kalibruj_brev(arm, so, cfg)
     elif cmd == ["kalibruj"]:  # "kalibruj gotowe" = chwytak juz stoi na szyjce butelki (bez klawiatury)
         kalibruj(arm, so, cfg, naprowadzony=sys.argv[2:3] == ["gotowe"])
-    elif cmd in (["gdzie"], ["celuj"]):
+    elif cmd in (["gdzie"], ["celuj"], ["chwyc"]):
         if not cfg["kalibracja"]:
             raise SystemExit("brak kalibracji: python butelki.py kalibruj")
         so.sledzenie(False)
@@ -865,7 +909,12 @@ def main():
         (x, y), (u, v) = cel
         print(f"butelka: ({u:.0f}, {v:.0f}) px -> RoArm x={x:.0f} y={y:.0f} mm, {math.hypot(x, y):.0f} mm od podstawy"
               + ("" if w_zasiegu(cfg, x, y) else "  POZA ZASIEGIEM"))
-        if cmd == ["celuj"] and w_zasiegu(cfg, x, y):
+        if cmd == ["chwyc"] and w_zasiegu(cfg, x, y):
+            odbior = dict(cfg["kalibracja"]["chwyt"], x=x, y=y)
+            ok = chwyc(arm, so, cfg, odbior, px=(u, v))
+            print("TRZYMA - RoArm czeka nad stolem (python butelki.py idz czekaj = odjazd z butelka)" if ok
+                  else "nie chwycil (3 proby) - zmien szyjka_nad_stolem_mm albo powtorz kalibracje")
+        elif cmd == ["celuj"] and w_zasiegu(cfg, x, y):
             jedz(arm, dict(cfg["kalibracja"]["chwyt"], x=x, y=y), cfg["chwyt_otwarty"],
                  dz=cfg["podejscie_mm"], spd=cfg["spd"])
             print(f"RoArm stoi {cfg['podejscie_mm']} mm nad miejscem chwytania - chwytak powinien byc nad szyjka")
