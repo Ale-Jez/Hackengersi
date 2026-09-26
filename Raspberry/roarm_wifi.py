@@ -1,4 +1,5 @@
 """RoArm-M3 over WiFi: HTTP GET http://<ip>/js?json=...
+<ip> can also be "localhost:8766": roarm_usb.py serves the same API over the arm's USB cable (config.json default).
 Position: {"T":105} returns {"T":1051, x y z (mm), tit, b s e t r g (rad), ...} in the HTTP reply
 (seen on this arm's firmware; the vendor source's ws://<ip>/ws feed did not connect, so it is not used).
 Gripper feedback g reads 0 on some firmware whatever the fingers do.
