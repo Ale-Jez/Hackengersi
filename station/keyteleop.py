@@ -17,7 +17,7 @@ HELP = """\
  A/D  base      (+ = left)         W/S  shoulder (+ = forward/down)
  R/F  elbow     (+ = down)         T/G  wrist
  Y/H  roll                         Z/X  gripper open / close
- [ ]  smaller / bigger step        +/-  slower / faster
+ [ ]  smaller / bigger step        +/-  faster / slower
  P    print measured pose          SPACE stop and hold the pose
  C    resume jogging               Q or Ctrl+C  quit
 """
@@ -38,7 +38,7 @@ def main(arm, kbhit=msvcrt.kbhit, getwch=msvcrt.getwch):
     step, spd, stopped, quit_ = 0.05, 500, False, False
     p = arm.pose()
     tgt = {k: p[k] for k in LIMITS}
-    grip = arm._grip or 1.57  # measured g has read 0 regardless of the gripper, so don't trust it
+    grip = arm._grip  # never the measured g (reads 0); it's the same value move() re-sends
     dirty = gdirty = False
     last = 0.0
     print(HELP)
@@ -87,7 +87,8 @@ def main(arm, kbhit=msvcrt.kbhit, getwch=msvcrt.getwch):
                 j, d = JOG[c]
                 lead = LEAD_STEPS * step
                 v = clamp(tgt[j] + d * step, (meas[j] - lead, meas[j] + lead))
-                v2 = clamp(v, LIMITS[j])
+                lo, hi = LIMITS[j]  # a joint resting outside its limits may only move inward
+                v2 = clamp(v, (min(lo, meas[j]), max(hi, meas[j])))
                 if v != v2:
                     print(f"\n'{c}': {tgt[j]:.3f} -> {v:.3f} (clamped to {v2:.3f})")
                 tgt[j] = v2
@@ -118,22 +119,30 @@ def main(arm, kbhit=msvcrt.kbhit, getwch=msvcrt.getwch):
 def selftest():
     # each group is one drain pass; the 20 'a's must be capped by the lead limit (the mock arm's
     # measured pose only updates on send) and ' ' must block the later 'a'; +- and [] are also tested
-    groups = ["a" * 20 + "xxwfff+[-]", " a", "q"]
-    cur = []
+    def drive(arm, groups):
+        cur = []
 
-    def kbhit():
-        if not cur and groups:
-            cur.extend(groups.pop(0))
-            return False  # nothing pending this pass
-        return bool(cur)
+        def kbhit():
+            if not cur and groups:
+                cur.extend(groups.pop(0))
+                return False  # nothing pending this pass
+            return bool(cur)
+
+        main(arm, kbhit, lambda: cur.pop(0))
 
     with RoArm(mock=True) as arm:
-        main(arm, kbhit, lambda: cur.pop(0))
+        drive(arm, ["a" * 20 + "xxwfff+[-]", " a", "q"])
         p = arm.pose()
         assert abs(p["b"] - 0.15) < 1e-9, p   # capped at LEAD_STEPS x 0.05, not 20 x 0.05
         assert abs(p["s"] - 0.05) < 1e-9, p
         assert p["e"] == 0.0, p                # clamped at the lower limit
         assert abs(p["g"] - (1.57 + 0.4)) < 1e-9, p  # 2 x (4 x 0.05) closing
+    with RoArm(mock=True) as arm:  # rests at s=-1.687, past the -1.57 limit (real arm)
+        arm._pose["s"] = -1.687
+        drive(arm, ["s", "q"])  # S goes further out: must stay put, not flip to -1.57
+        assert arm.pose()["s"] == -1.687, arm.pose()
+        drive(arm, ["w", "q"])  # W goes inward
+        assert arm.pose()["s"] > -1.687, arm.pose()
     print("selftest ok")
 
 

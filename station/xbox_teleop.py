@@ -47,7 +47,7 @@ class XboxTeleop:
 
         p = arm.pose()
         self.tgt = {k: p[k] for k in LIMITS}
-        self.grip = arm._grip or 1.57
+        self.grip = arm._grip
 
         # Analog stick values (0.0-1.0, deadzone applied)
         self.sticks = defaultdict(float)  # "LX", "LY", "RX", "RY"
