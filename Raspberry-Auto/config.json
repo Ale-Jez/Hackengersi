@@ -1,13 +1,16 @@
 {
   "candle_bus": "USB",
-  "left_id": null,
-  "right_id": null,
+  "left_id": 574,
+  "right_id": 572,
   "left_sign": 1,
   "right_sign": -1,
   "max_wheel_rad_s": 12.0,
   "accel_rad_s2": 20.0,
+  "max_torque": 0.6,
+  "vel_pid": [0.06, 0.002, 0.0, 0.5],
 
-  "camera": 0,
+  "camera": "csi",
+  "camera_flip": true,
   "camera_size": [640, 480],
 
   "drive_speed": 0.5,

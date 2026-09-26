@@ -2,7 +2,7 @@
 
     python motors.py ping      list the drive ids on the bus and blink them
     python motors.py test      left wheel, right wheel, both: slowly forward 1 s each (wheels OFF the ground!)
-    python motors.py jog       keyboard drive: w/s forward/back, a/d spin, space stop, q quit
+    python motors.py jog       keyboard drive: w/s forward/back, a/d spin, z/c arc left/right, space stop, q quit
 
 Needs `pip install candlesdk` (imports as pyCandle). MOCK=1 runs without hardware.
 """
@@ -50,6 +50,11 @@ class Wheels:
                 if md.init() != pc.MD_Error_t.OK:
                     raise RuntimeError(f"drive {can_id} not answering (power? CAN cable? id?)")
                 md.clearErrors()
+                md.setMaxTorque(cfg["max_torque"])
+                # the factory gains are too soft to turn a loaded car. Written one register at a time:
+                # md.setVelocityPIDparam() returns OK but leaves the values unchanged (candlesdk 1.5.0)
+                for reg, val in zip(("motorVelPidKp", "motorVelPidKi", "motorVelPidKd", "motorVelPidWindup"), cfg["vel_pid"]):
+                    pc.writeRegisterFloat(md, reg, val)
                 md.setMotionMode(pc.MotionMode_t.VELOCITY_PID)
                 md.enable()
                 self.mds.append(md)
@@ -117,7 +122,8 @@ def test(cfg):
 def jog(cfg, speed=0.3):
     import termios
     import tty
-    keys = {"w": (speed, speed), "s": (-speed, -speed), "a": (-speed, speed), "d": (speed, -speed), " ": (0, 0)}
+    keys = {"w": (speed, speed), "s": (-speed, -speed), "a": (-speed, speed), "d": (speed, -speed),
+            "z": (0, speed), "c": (speed, 0), " ": (0, 0)}  # z/c: pivot on the stopped wheel, less floor scrub
     w, fd = Wheels(cfg), sys.stdin.fileno()
     old = termios.tcgetattr(fd)
     print(__doc__.splitlines()[4].strip())

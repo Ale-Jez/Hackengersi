@@ -192,7 +192,7 @@ if __name__ == "__main__":
     if cmd not in ("run", "tag"):
         sys.exit(__doc__)
     cfg = load_config()
-    cam = Camera(None if MOCK else cfg["camera"], tuple(cfg["camera_size"]))
+    cam = Camera(None if MOCK else cfg["camera"], tuple(cfg["camera_size"]), cfg.get("camera_flip", False))
     wheels = Wheels(cfg)
     try:
         if cmd == "run":

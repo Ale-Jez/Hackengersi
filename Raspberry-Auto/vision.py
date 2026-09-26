@@ -16,25 +16,43 @@ _detector = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.
 
 class Camera:
     """A thread keeps reading, so frame() returns the newest image, never one the driver buffered a
-    second ago (stale frames make the steering oscillate). index None = mock grey frames."""
+    second ago (stale frames make the steering oscillate). index None = mock grey frames,
+    "csi" = the ribbon-cable camera (Camera Module 3) through picamera2, a number = a USB camera."""
 
-    def __init__(self, index=0, size=(640, 480)):
+    def __init__(self, index=0, size=(640, 480), flip=False):
         self.mock, self.size = index is None, size
         if self.mock:
             return
-        self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2 if sys.platform == "linux" else cv2.CAP_ANY)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, size[1])
-        if not self.cap.isOpened() or not self.cap.read()[0]:
-            raise RuntimeError(f"camera {index}: no frames (wrong index? `v4l2-ctl --list-devices`)")
+        if index == "csi":
+            from libcamera import Transform
+            from picamera2 import Picamera2
+            self.cam = Picamera2()
+            # "RGB888" is B,G,R in memory, i.e. what OpenCV expects. flip: camera mounted upside down
+            self.cam.configure(self.cam.create_video_configuration(
+                main={"size": tuple(size), "format": "RGB888"}, transform=Transform(hflip=flip, vflip=flip)))
+            if "AfMode" in self.cam.camera_controls:  # Module 3 autofocus is off in video mode: blurry tags
+                self.cam.set_controls({"AfMode": 2})  # 2 = continuous
+            self.cam.start()
+            self._read = lambda: (True, self.cam.capture_array())
+        else:
+            self.cap = cv2.VideoCapture(index, cv2.CAP_V4L2 if sys.platform == "linux" else cv2.CAP_ANY)
+            self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, size[1])
+            if not self.cap.isOpened():
+                raise RuntimeError(f"camera {index}: cannot open (wrong index? `v4l2-ctl --list-devices`)")
+            self._read = self.cap.read
+            if flip:
+                self._read = lambda: (lambda ok, img: (ok, cv2.rotate(img, cv2.ROTATE_180) if ok else img))(*self.cap.read())
+        if not self._read()[0]:
+            raise RuntimeError(f"camera {index}: no frames")
         self.img, self.seq, self.last = None, 0, 0
         self.cond = threading.Condition()
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self):
         while True:
-            ok, img = self.cap.read()
+            ok, img = self._read()
             if ok:
                 with self.cond:
                     self.img, self.seq = img, self.seq + 1
@@ -119,7 +137,7 @@ if __name__ == "__main__":
         sys.exit(__doc__)
     from motors import load_config
     cfg = load_config()
-    img = Camera(cfg["camera"], tuple(cfg["camera_size"])).frame()
+    img = Camera(cfg["camera"], tuple(cfg["camera_size"]), cfg.get("camera_flip", False)).frame()
     obs = Obstacles(cfg)
     if cmd == "floor":
         obs.learn(img)

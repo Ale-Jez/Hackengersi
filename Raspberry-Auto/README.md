@@ -24,21 +24,28 @@ Two MAB **MA-D-GL40 KV70** direct-drive actuators (one per wheel, each with its 
 
 ## Setup
 
+On the Pi (Raspberry Pi OS 13), OpenCV and picamera2 come from apt, and `candlesdk` has no ARM wheel on PyPI and its sdist lacks submodules, so build it from git:
+
 ```sh
-python3 -m venv .venv && . .venv/bin/activate
-pip install -r requirements.txt
+sudo apt install -y python3-venv python3-opencv python3-picamera2 libusb-1.0-0-dev build-essential git
+python3 -m venv --system-site-packages .venv && . .venv/bin/activate
+git clone --recursive --depth 1 https://github.com/mabrobotics/CANdle-SDK.git ~/CANdle-SDK
+CMAKE_POLICY_VERSION_MINIMUM=3.5 pip install ~/CANdle-SDK
+echo 'SUBSYSTEM=="usb", ATTR{idVendor}=="0069", ATTR{idProduct}=="1000", MODE="0666"' | sudo tee /etc/udev/rules.d/99-candle.rules
+sudo udevadm control --reload-rules && sudo udevadm trigger
 python drive.py selftest
 ```
 
-- **CANdle:** plug it into USB, power the actuators, and follow MAB's CANdle setup (the udev rule, or run as root). The Python package `candlesdk` imports as `pyCandle`. The CANdle HAT (SPI) is not supported by its Python bindings yet, so use the USB dongle.
-- **Camera:** find the index with `v4l2-ctl --list-devices`, then set `camera`.
+- **CANdle:** plug it into USB and power the actuators. The Python package `candlesdk` imports as `pyCandle`. The CANdle HAT (SPI) is not supported by its Python bindings yet, so use the USB dongle.
+- **Drive gains:** the factory velocity PID is too soft to turn the loaded car, so `motors.py` writes `vel_pid` (kp, ki, kd, windup) and `max_torque` on every start. It writes the registers one by one, because `MD.setVelocityPIDparam()` returns OK but changes nothing in candlesdk 1.5.0. Nothing is saved to the drives.
+- **Camera:** `"camera": "csi"` is the ribbon camera (Camera Module 3, through picamera2, continuous autofocus). A number is a USB camera index (`v4l2-ctl --list-devices`). `camera_flip` turns the image 180° for a camera mounted upside down.
 
 ## Bring-up (wheels off the ground first)
 
 1. `python motors.py ping` prints the drive ids. Put them in `left_id` / `right_id`.
 2. `python motors.py test` runs left, then right, then both, slowly forward. If the wrong wheel moves, swap the ids. If a wheel turns backwards, flip its `*_sign`.
 3. Set the current / torque limit and the CAN watchdog on each drive with MAB's `candletool` (or MD tool). The GL40 is direct drive (about 0.25 Nm rated), so check that it can push the loaded can on your floor before tuning speed.
-4. Put it on the floor: `python motors.py jog` (w/s/a/d, space to stop, q to quit).
+4. Put it on the floor: `python motors.py jog` (w/s, a/d spin, z/c arc turn around the stopped wheel, space to stop, q to quit).
 5. Obstacles: point the car at clear floor, run `python vision.py floor`, then `python vision.py snap` with a box in front. Red pixels in the cyan corridor are "not floor". Tune `obstacle_roi` (fractions of the frame) and `obstacle_frac`.
 6. Tags: `python drive.py tag 1 150`. If it zig-zags, lower `steer_gain`. If it spins too often, raise `pivot_enter`.
 7. `python drive.py run`.
