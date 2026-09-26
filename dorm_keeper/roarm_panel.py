@@ -20,7 +20,7 @@ WYPRZEDZENIE = 0.6               # s: cel jest tyle ruchu przed ramieniem -> jed
 PODNIES_MM = 100.0               # P: chwyc i podnies o tyle
 SERWO_GORACE = (60, 65)          # st. C: od 65 jazda zablokowana (serwo odpoczywa), od 60 w dol znowu wolno
 SERWA_ROARM = ["podstawa", "bark 1", "bark 2", "lokiec", "nadgarstek", "obrot", "chwytak"]  # kolejnosc "temp" z /ws
-Z_ZAKRES = (-150.0, 350.0)       # mm
+Z_ZAKRES = (-150.0, 350.0)       # mm (RoArm do gory nogami: odwrocony, patrz _konfig)
 OBCIAZENIE_STOP = 350            # |obciazenie| barku/lokcia (jednostki firmware): ponad = STOP i trzymaj
 PODTRZYMANIE = 0.35              # s: bez sygnalu z przegladarki ramie staje (puszczony przycisk, zerwane WiFi)
 # ruch po ludzku (wzgledem podstawy RoArma): obrot calej podstawy, wysuniecie od podstawy, wysokosc, chwytak
@@ -40,6 +40,7 @@ class PanelRoArma:
         cfg = _konfig()
         self.ip, self.zasieg = cfg["roarm_ip"], cfg["zasieg_mm"]
         self.otw, self.zam = cfg["chwyt_otwarty"], cfg["chwyt_zamkniety"]
+        self.gora = -1 if cfg.get("odwrocony") else 1  # RoArm do gory nogami: "w gore" = -z RoArma
         self.cel = None           # cel sterowania x y z t r (od pierwszego odczytu)
         self.t_cmd = self.r_cmd = 0.0  # zapamietane pochylenie i obrot chwytaka (zmieniaja je tylko J/L i U/O)
         self.t_ruch = 0.0
@@ -128,7 +129,7 @@ class PanelRoArma:
         elif os_ == "obrot":
             kat += znak * v / max(rho, 100.0)
         else:
-            z += znak * v
+            z += znak * v * self.gora  # z+ = w gore w swiecie (do gory nogami: -z RoArma)
         return self._ogranicz({"x": rho * math.cos(kat), "y": rho * math.sin(kat), "z": z,
                                "t": self.t_cmd, "r": self.r_cmd})
 
@@ -165,7 +166,8 @@ class PanelRoArma:
         if r > hi or r < lo:
             k = (hi if r > hi else lo) / max(r, 1e-6)
             c["x"], c["y"] = c["x"] * k, c["y"] * k
-        c["z"] = min(max(c["z"], Z_ZAKRES[0]), Z_ZAKRES[1])
+        lo, hi = Z_ZAKRES if self.gora > 0 else (-Z_ZAKRES[1], 550.0)  # podwieszony: w dol = +z, dalej niz 350
+        c["z"] = min(max(c["z"], lo), hi)
         c["t"] = min(max(c["t"], -3.14), 3.14)
         c["r"] = min(max(c["r"], -3.14), 3.14)
         return c
@@ -187,7 +189,11 @@ class PanelRoArma:
                                      g=d.get("g"), bark=d.get("tS", 0), lokiec=d.get("tE", 0), podstawa=d.get("tB", 0))
                     # wszystkie obciazenia 0 = serwa bez momentu: katy z odczytu bywaja wtedy falszywe (+-pi),
                     # a ruch "wzgledem nich" potrafi obrocic cale ramie - dlatego najpierw _moment_tutaj
-                    self.bez_momentu = not any(d.get(k) for k in ("tB", "tS", "tE", "tT", "tR"))
+                    # torswitch* = moment wl. (firmware); obciazenia zawodza, gdy ramie wisi (grawitacja wzdluz)
+                    if "torswitchS" in d:
+                        self.bez_momentu = not any(d.get(k) for k in ("torswitchB", "torswitchS", "torswitchE"))
+                    else:
+                        self.bez_momentu = not any(d.get(k) for k in ("tB", "tS", "tE", "tT", "tR"))
                     if self.cel is None:  # tylko zapamietaj - zadnego ruchu przy polaczeniu
                         self.cel = {"x": d["x"], "y": d["y"], "z": d["z"], "t": d["tit"], "r": d.get("r", 0.0)}
                         self.t_cmd, self.r_cmd = d["tit"], d.get("r", 0.0)
