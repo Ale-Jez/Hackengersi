@@ -810,3 +810,5 @@ pkg/
 src/
 
 # End of https://www.toptal.com/developers/gitignore/api/archlinuxpackages
+# model wykrywania butelek (70 MB) - ramie.py pobiera go sam
+dorm_keeper/modele/
