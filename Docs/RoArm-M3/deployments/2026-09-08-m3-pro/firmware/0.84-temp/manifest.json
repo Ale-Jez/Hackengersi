@@ -1,0 +1,23 @@
+{
+  "firmware": "0.84 stock + T:1051 \"temp\" array",
+  "base_source": "downloads/RoArm-M3_example_20260701.zip (sha256 a28247fe...1f57), identical to vendor/RoArm-M3_example",
+  "patch": "temp.patch",
+  "application_file": "RoArm-M3_temp.ino.bin",
+  "application_sha256": "f48178d0f646155140c1b8830050cd100f9a6cf1af2b14967ecd7465e61e4314",
+  "application_bytes": 1296032,
+  "application_offset": "0x10000",
+  "application_limit_bytes": 1310720,
+  "partition_table_matches_factory": true,
+  "stock_rebuild_bytes": 1293360,
+  "stock_rebuild_sha256": "4a0f97c5b2cb2ccf5726108bea11e95d3ce7068e86ac575196355a754235b409",
+  "official_0.84_bytes": 1293392,
+  "arduino_esp32_core": "3.0.7",
+  "ArduinoJson": "7.3.1",
+  "ESP Async WebServer": "3.6.0",
+  "Async TCP": "3.3.2",
+  "other_libraries": "vendor/ (Adafruit_BusIO 1.17.2, Adafruit_GFX 1.12.1, Adafruit_NeoPixel 1.15.1, Adafruit_SSD1306 2.5.15, INA219_WE 1.3.4, SCServo 1.0.1)",
+  "fqbn": "esp32:esp32:esp32:FlashMode=dio,FlashFreq=80,FlashSize=4M,PartitionScheme=default",
+  "built_on": "Brev x86_64, ~/roarm-fw, 2026-09-26",
+  "flashed": "2026-09-26 on the RoArm at 192.168.32.103 (MAC F0:24:F9:10:E2:88)",
+  "note": "stock 0.84 + T:1051 'temp' array (servos 11-17, C) + servo 13 read each loop + GET /js returns the latest T:1051 snapshot (10 Hz) instead of {\"ok\":1}; see temp.patch"
+}

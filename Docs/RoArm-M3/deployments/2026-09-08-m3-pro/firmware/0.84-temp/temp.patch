@@ -1,0 +1,68 @@
+diff -ru -x '*.ino' src/RoArm-M3_example/RoArm-M3_module.h src/RoArm-M3_temp/RoArm-M3_module.h
+--- src/RoArm-M3_example/RoArm-M3_module.h	2026-09-26 17:39:21.000000000 +0000
++++ src/RoArm-M3_temp/RoArm-M3_module.h	2026-09-26 17:54:13.307396962 +0000
+@@ -625,6 +625,7 @@
+ void RoArmM3_getPosByServoFeedback() {
+   getFeedback(BASE_SERVO_ID, true);
+   getFeedback(SHOULDER_DRIVING_SERVO_ID, true);
++  getFeedback(SHOULDER_DRIVEN_SERVO_ID, true);  // temp: stock never refreshes servo 13 at runtime
+   getFeedback(ELBOW_SERVO_ID, true);
+ 
+   getFeedback(WRIST_SERVO_ID, true);
+@@ -666,6 +667,8 @@
+   jsonInfoHttp["tT"] = servoFeedback[WRIST_SERVO_ID - 11].load;
+   jsonInfoHttp["tR"] = servoFeedback[ROLL_SERVO_ID - 11].load;
+   jsonInfoHttp["tG"] = servoFeedback[GRIPPER_SERVO_ID - 11].load;
++  JsonArray temp = jsonInfoHttp["temp"].to<JsonArray>();
++  for (int i = 0; i < 7; i++) temp.add(servoFeedback[i].temper);
+ 
+   jsonInfoHttp["torswitchB"] = servoFeedback[BASE_SERVO_ID - 11].Torquestatus;
+   jsonInfoHttp["torswitchS"] = servoFeedback[SHOULDER_DRIVING_SERVO_ID - 11].Torquestatus;
+diff -ru -x '*.ino' src/RoArm-M3_example/http_server.h src/RoArm-M3_temp/http_server.h
+--- src/RoArm-M3_example/http_server.h	2026-09-26 17:39:21.000000000 +0000
++++ src/RoArm-M3_temp/http_server.h	2026-09-26 17:58:01.679821898 +0000
+@@ -58,7 +58,11 @@
+   // 序列化 JSON 并返回
+     //serializeJson(jsonInfoHttp, jsonFeedbackWeb);
+     //request->send(200, "application/json", jsonFeedbackWeb);
+-    request->send(200, "application/json","{\"ok\":1}");
++    char out[sizeof(fbHttpSnap)];  // temp build: reply with the latest feedback (T:1051 + temp), like older firmware
++    portENTER_CRITICAL(&fbHttpMux);
++    memcpy(out, fbHttpSnap, sizeof(out));
++    portEXIT_CRITICAL(&fbHttpMux);
++    request->send(200, "application/json", out);
+     // 清理
+     //jsonFeedbackWeb = "";
+   });
+--- src/RoArm-M3_example/RoArm-M3_example.ino	2026-09-26 17:39:21.000000000 +0000
++++ src/RoArm-M3_temp/RoArm-M3_temp.ino	2026-09-26 17:58:01.678821905 +0000
+@@ -3,6 +3,10 @@
+ StaticJsonDocument<256> jsonInfoSend;
+ StaticJsonDocument<256> jsonInfoHttp;
+ JsonDocument jsonFeedback;
++// temp build: latest T:1051 as text for GET /js. The async web task must not read jsonInfoHttp while loop() rewrites it.
++char fbHttpSnap[1024] = "{}";
++portMUX_TYPE fbHttpMux = portMUX_INITIALIZER_UNLOCKED;
++unsigned long fbHttpTick = 0;
+ #include <SCServo.h>
+ #include <Preferences.h>
+ #include <nvs_flash.h>
+@@ -214,6 +218,18 @@
+     RoArmM3_infoFeedback();
+   }
+ 
++  if (millis() - fbHttpTick >= 100) {  // temp build: refresh the /js snapshot at 10 Hz
++    fbHttpTick = millis();
++    RoArmM3_infoFeedback();
++    char tmp[sizeof(fbHttpSnap)];
++    size_t n = serializeJson(jsonInfoHttp, tmp, sizeof(tmp));
++    if (n > 0 && n < sizeof(tmp) - 1) {
++      portENTER_CRITICAL(&fbHttpMux);
++      memcpy(fbHttpSnap, tmp, n + 1);
++      portEXIT_CRITICAL(&fbHttpMux);
++    }
++  }
++
+   if(runNewJsonCmd) {
+     jsonCmdReceiveHandler();
+     jsonCmdReceive.clear();

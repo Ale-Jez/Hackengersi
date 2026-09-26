@@ -2304,8 +2304,9 @@ class DetektorButelek:
         duza = sledzona butelka duza w kadrze -> sama mala skala, swieza w kazdej klatce (szybko i bez skokow)."""
         import cv2
 
-        # laptop tylko do wypatrywania butelek: przy sledzeniu opoznienie WiFi (60-400 ms, zmienne) rozbujaloby ramie
-        zdalnie = yolo_laptop_aktywny() and not sledzi
+        # YOLO zawsze na Brev (decyzja zespolu 2026-09-26), tez przy sledzeniu - opoznienie WiFi moze bujac ramie;
+        # Pi liczy samo tylko, gdy Brev milczy > ZDALNY_YOLO_CISZA
+        zdalnie = yolo_laptop_aktywny()
         _web["yolo"] = "laptop" if zdalnie else "lokalnie"  # napis na obrazie i w /pokaz
         if zdalnie != getattr(self, "_zdalnie", False):
             self._zdalnie = zdalnie

@@ -34,7 +34,7 @@ import requests
 
 _katalog = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(_katalog, "..", "Raspberry"))  # na laptopie: roarm_wifi.py z folderu kolegi
-from roarm_wifi import RoArm  # noqa: E402
+from roarm_wifi import Overheat, RoArm  # noqa: E402
 
 PLIK = os.path.join(_katalog, "roarm_kaucja.json")
 KONFIG_KOLEGI = [os.path.expanduser("~/Hackengersi/Raspberry/config.json"),  # repo (git pull = aktualny adres)
@@ -638,5 +638,5 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         print("\nKoniec.")
-    except (RuntimeError, TimeoutError, requests.RequestException) as e:
+    except (RuntimeError, TimeoutError, Overheat, requests.RequestException) as e:
         sys.exit(f"BLAD: {e}")
