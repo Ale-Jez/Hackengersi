@@ -26,6 +26,11 @@ PODTRZYMANIE = 0.35              # s: bez sygnalu z przegladarki ramie staje (pu
 # ruch po ludzku (wzgledem podstawy RoArma): obrot calej podstawy, wysuniecie od podstawy, wysokosc, chwytak
 KIERUNKI = {"obrot+": ("obrot", 1), "obrot-": ("obrot", -1), "wysun": ("zasieg", 1), "cofnij": ("zasieg", -1),
             "z+": ("z", 1), "z-": ("z", -1), "t+": ("t", 1), "t-": ("t", -1), "r+": ("r", 1), "r-": ("r", -1)}
+# pojedyncze stawy (T:101): jeden przycisk = jeden staw, zadne inne sie nie ruszaja
+STAWY = {1: ("b", "podstawa"), 2: ("s", "bark"), 3: ("e", "lokiec"), 4: ("t", "nadgarstek"), 5: ("r", "obrot"),
+         6: ("g", "chwytak")}
+KIERUNKI.update({f"j{n}{z}": ("staw", n if z == "+" else -n) for n in STAWY for z in "+-"})
+STAW_RAD_S = {"wolno": 0.15, "normalnie": 0.3, "szybko": 0.5}  # rad/s
 
 
 def _konfig():
@@ -150,6 +155,23 @@ class PanelRoArma:
         self.bez_momentu = False
         self.stan["komunikat"] = "silniki wlaczone tutaj - przytrzymaj przycisk, zeby jechac"
 
+    def _staw(self, d):
+        """Jeden staw o predkosc * WYPRZEDZENIE przed zmierzonym katem (T:101 - tylko ten staw)."""
+        n = abs(KIERUNKI[self.kier][1])
+        znak = 1 if KIERUNKI[self.kier][1] > 0 else -1
+        w = STAW_RAD_S[self.predkosc]
+        rad = d[STAWY[n][0]] + znak * w * WYPRZEDZENIE
+        try:
+            self._js({"T": 101, "joint": n, "rad": round(rad, 3), "spd": int(w * 4096 / 6.283), "acc": 10})
+        except requests.Timeout:
+            pass
+        # tryb "jak SO-101" startuje potem od tego, gdzie ramie naprawde jest
+        self.cel = {"x": d["x"], "y": d["y"], "z": d["z"], "t": d["tit"], "r": d.get("r", 0.0)}
+        self.t_cmd, self.r_cmd = d["tit"], d.get("r", 0.0)
+        if n == 6:
+            self.g = rad
+        self.stan["komunikat"] = f"{STAWY[n][1]} {'+' if znak > 0 else '-'}"
+
     def _chwytak(self, zamknij):
         self.g = self.zam if zamknij else self.otw
         try:
@@ -206,9 +228,12 @@ class PanelRoArma:
                         jedzie = False
                     if jedzie:  # cel stale ~0.6 s przed ramieniem: jedzie rowno; puszczony przycisk = staje 1-3 cm dalej
                         dt, self.t_ruch = min(max(t_odczyt - self.t_ruch, 0.05), 0.4), t_odczyt
-                        self.cel = self._przed_ramieniem(d, dt)
-                        self._jedz(self.cel, spd=PREDKOSCI[self.predkosc][1])
-                        self.stan["komunikat"] = "jade"
+                        if self.kier.startswith("j"):
+                            self._staw(d)
+                        else:
+                            self.cel = self._przed_ramieniem(d, dt)
+                            self._jedz(self.cel, spd=PREDKOSCI[self.predkosc][1])
+                            self.stan["komunikat"] = "jade"
                 with self._lock:
                     polecenia, self.polecenia = self.polecenia, []
                 for p in polecenia:
@@ -370,6 +395,13 @@ details{margin-top:8px;font-size:13px;color:var(--przyg)}#serwa{display:grid;gri
 <div id="uwagi"></div><details><summary>wszystkie serwa</summary><div id="serwa"></div></details></div>
 <h2>Skad patrzysz na RoArma?</h2><div class="siatka" style="grid-template-columns:1fr 1fr">
 <button data-widok="przod">Stoje PRZED nim<small>twarza do robota</small></button><button data-widok="tyl">Stoje ZA nim<small>patrze tam, gdzie on</small></button></div>
+<h2>Stawy - kazdy przycisk rusza JEDNYM stawem (przytrzymaj)</h2><div class="siatka" style="grid-template-columns:1.3fr 1fr 1fr">
+<span>podstawa</span><button data-k="j1-">-</button><button data-k="j1+">+</button>
+<span>bark</span><button data-k="j2-">-</button><button data-k="j2+">+</button>
+<span>lokiec</span><button data-k="j3-">-</button><button data-k="j3+">+</button>
+<span>nadgarstek</span><button data-k="j4-">-</button><button data-k="j4+">+</button>
+<span>obrot chwytaka</span><button data-k="j5-">-</button><button data-k="j5+">+</button>
+<span>chwytak</span><button data-k="j6-">-</button><button data-k="j6+">+</button></div>
 <h2>Ruch - jak SO-101 (przytrzymaj, puszczasz = stoi; chwytak trzyma swoj kat jak hak dzwigu)</h2><div class="siatka">
 <button data-k="z+">GORA<small>W</small></button><button data-k="wysun">DALEJ<small>R - od podstawy</small></button><button data-l="1">LEWO<small>A</small></button>
 <button data-k="z-">DOL<small>S</small></button><button data-k="cofnij">BLIZEJ<small>F - do podstawy</small></button><button data-l="-1">PRAWO<small>D</small></button>
