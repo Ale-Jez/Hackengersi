@@ -41,6 +41,35 @@ python drive.py selftest
 - **Drive gains:** the factory velocity PID is too soft to turn the loaded car, so `motors.py` writes `vel_pid` (kp, ki, kd, windup) and `max_torque` on every start. It writes the registers one by one, because `MD.setVelocityPIDparam()` returns OK but changes nothing in candlesdk 1.5.0. Nothing is saved to the drives.
 - **Camera:** `"camera": "csi"` is the ribbon camera (Camera Module 3, through picamera2, continuous autofocus). A number is a USB camera index (`v4l2-ctl --list-devices`). `camera_flip` turns the image 180° for a camera mounted upside down.
 
+## Networks
+
+The Pi (`malina-auto`, user `hackengersi`) joins WiFi on its own. The saved networks live in NetworkManager on the Pi, not in this repo, and the passwords stay off git.
+
+| SSID | Priority | Pi's address range |
+|---|---|---|
+| `POCO X8 PRO` / `POCO X8 Pro` (phone hotspot) | 10 | `10.192.231.x` |
+| `4G-Gateway-7417` | 5 | `192.168.32.x` |
+| `iPhone (Jan)` (phone hotspot) | 0 | `172.20.10.x` |
+
+When several networks are in range, the Pi prefers the higher priority when it connects, but it does not leave a working connection. SSIDs are case-sensitive, so copy the exact name from a laptop connected to that network (`netsh wlan show interfaces` on Windows).
+
+Add a network (the WiFi country is PL):
+
+```sh
+sudo nmcli connection add type wifi ifname wlan0 con-name "<ssid>" ssid "<ssid>" \
+  wifi-sec.key-mgmt wpa-psk wifi-sec.psk "<password>" connection.autoconnect-priority 5
+nmcli -f NAME,AUTOCONNECT-PRIORITY,DEVICE connection show   # list; `sudo nmcli connection up "<ssid>"` switches now
+```
+
+**Finding the Pi:** `malina-auto.local` often does not resolve from Windows, so put the laptop on the same network and look for an open SSH port:
+
+```powershell
+$pre = (Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias Wi-Fi).IPAddress -replace '\.\d+$','.'
+1..254 | % { $c = New-Object Net.Sockets.TcpClient; if ($c.ConnectAsync("$pre$_",22).Wait(150) -and $c.Connected) { "$pre$_" }; $c.Close() }
+```
+
+Before cutting the power, shut down with `sudo poweroff` (or hold the power button about 2 s). A hard power cut once corrupted an SD card.
+
 ## Bring-up (wheels off the ground first)
 
 1. `python motors.py ping` prints the drive ids. Put them in `left_id` / `right_id`.
