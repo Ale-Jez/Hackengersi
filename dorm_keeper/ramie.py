@@ -342,10 +342,11 @@ PLIK_KAUCJI = "kaucja.json"      # wlasna lista EAN z kaucja (oprocz api.kaucja.
 SLEDZ = True                     # startuje wlaczone
 # PLYNNE sledzenie: predkosc ramienia proporcjonalna do odleglosci celu od srodka obrazu.
 SLEDZ_PLYNNIE = True             # False = stary tryb "popraw i poczekaj" (ruch - pauza - ruch)
-SLEDZ_PETLA = 1.2                # szybkosc reakcji (1/s): wiecej = szybciej dogania, za duzo = przestrzeliwuje
-                                 # (bylo 2.2 przy czulosci zawyzonej 3x = w praktyce 0.7; teraz czulosc prawdziwa)
-SLEDZ_MAX_V = 30.0               # st./s: najszybszy ruch przy sledzeniu (szybciej = rozmazany obraz, kod nieczytelny)
-SLEDZ_FILTR = 0.4                # wygladzanie pozycji celu (0..1, mniej = gladziej, ale wolniej reaguje)
+SLEDZ_PETLA = 2.0                # szybkosc reakcji (1/s): wiecej = szybciej dogania, za duzo = przestrzeliwuje
+                                 # (bylo 1.2 przy YOLO na Brev; 2.0 wymaga YOLO na Pi przy sledzeniu - symulacja:
+                                 # 12 st. w 0.6 s zamiast ~1 s, bez bujania; przy opoznieniu Brev 2.0 by sie bujalo)
+SLEDZ_MAX_V = 45.0               # st./s: najszybszy ruch przy sledzeniu (szybciej = rozmazany obraz, kod nieczytelny)
+SLEDZ_FILTR = 0.5                # wygladzanie pozycji celu (0..1, mniej = gladziej, ale wolniej reaguje)
 CZULOSC_ZAKRES = (0.6, 2.0)      # nauka czulosci tylko w tym zakresie x wartosc startowa (zmierzona) - mniejsza =
                                  # za mocna reakcja = machanie, wieksza = ramie leniwie dogania butelke
 SLEDZ_UCZ_CZULOSC = True         # mierz na biezaco, o ile przesuwa sie obraz na 1 st. ruchu (zalezy od odleglosci)
@@ -377,7 +378,7 @@ SLEDZ_ASPEKT = {"butelka": 2.8, "puszka": 1.8}  # wysokosc/szerokosc - do szacow
 UCIETA_MAX = 1.3                 # ucieta butelka: zgadywana wielkosc najwyzej tyle razy widoczna czesc
 UCIETA_MAX_V = 12.0              # st./s: gdy butelka wystaje poza kadr, cel to tylko szacunek - jedz ostrozniej
 BLISKA_OD = 0.72                 # butelka wyzsza niz 72% kadru = tuz przed kamera: w pionie nie celuj (etykieta widac)
-SLEDZ_PRZYSP = 70.0              # st./s^2: predkosc sledzenia zmienia sie najwyzej tak szybko (plynny start i hamowanie)
+SLEDZ_PRZYSP = 120.0             # st./s^2: predkosc sledzenia zmienia sie najwyzej tak szybko (plynny start i hamowanie)
 SLEDZ_PROBKI = 3                 # z ilu klatek mediana pozycji kodu
 # Wykrywanie butelek siecia neuronowa. YOLO11n (onnxruntime) widzi tez butelke czesciowo poza kadrem;
 # SSD MobileNet v2 (samo OpenCV) - zapas, gdy nie ma onnxruntime.
@@ -2304,9 +2305,10 @@ class DetektorButelek:
         duza = sledzona butelka duza w kadrze -> sama mala skala, swieza w kazdej klatce (szybko i bez skokow)."""
         import cv2
 
-        # YOLO zawsze na Brev (decyzja zespolu 2026-09-26), tez przy sledzeniu - opoznienie WiFi moze bujac ramie;
-        # Pi liczy samo tylko, gdy Brev milczy > ZDALNY_YOLO_CISZA
-        zdalnie = yolo_laptop_aktywny()
+        # Brev tylko do wypatrywania butelek. Przy sledzeniu YOLO liczy Pi (320, ~32 ms): ping Pi->Brev to ~160 ms,
+        # a wynik z Brev jest z poprzedniej klatki - wykrycie sprzed 0.3-0.5 s bujalo ramieniem i wymuszalo wolne
+        # wzmocnienia (zmierzone 2026-09-26). Pi liczy tez wszystko, gdy Brev milczy > ZDALNY_YOLO_CISZA
+        zdalnie = yolo_laptop_aktywny() and not sledzi
         _web["yolo"] = "laptop" if zdalnie else "lokalnie"  # napis na obrazie i w /pokaz
         if zdalnie != getattr(self, "_zdalnie", False):
             self._zdalnie = zdalnie
