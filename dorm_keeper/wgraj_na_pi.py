@@ -116,7 +116,9 @@ for f in "$T"/dane/*; do [ -e "$f" ] && { [ -e "$D/$(basename "$f")" ] || cp "$f
 cp "$T/dorm-keeper.service" "$T/roarm-usb.service" ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable -q roarm-usb; loginctl enable-linger 2>/dev/null || true
-systemctl --user restart roarm-usb  # RoArm przez USB (roarm_ip "localhost:8766"); bez kabla restartuje sie co 3 s
+# NIGDY restart: otwarcie portu na Linuksie podnosi DTR/RTS -> reset ESP32 -> RoArm jedzie sam do pozy startowej
+# firmware (tak 2026-09-26 uderzyl w pojazd). Tylko start, gdy nie dziala; nowy roarm_usb.py: restart recznie.
+systemctl --user start roarm-usb
 """ + ("""systemctl --user enable -q dorm-keeper; loginctl enable-linger 2>/dev/null || true
 echo "autostart wlaczony"
 """ if "--autostart" in sys.argv else "") + """if ! systemctl --user is-enabled -q dorm-keeper; then
