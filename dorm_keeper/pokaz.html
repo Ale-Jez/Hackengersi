@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dorm-Keeper</title>
+<!-- Widok na prezentacje: http://<IP Raspberry>:8765/pokaz  (F = pelny ekran). Dane z /dane, obraz z /podglad?czysty -->
+<style>
+  :root {
+    --tlo: #0b0f14;
+    --panel: #121922;
+    --panel-2: #18212c;
+    --linia: #243040;
+    --tekst: #e8eef5;
+    --przygaszony: #8a9aac;
+    --akcent: #4cc2ff;
+    --kaucja: #2ecc71;
+    --bez: #ff5c5c;
+    --obroc: #ffb020;
+    --r: 14px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: radial-gradient(1200px 600px at 20% -10%, #14304a55, transparent), var(--tlo);
+    color: var(--tekst);
+    font: 16px/1.35 system-ui, "Segoe UI", Roboto, sans-serif;
+    display: grid; grid-template-rows: auto 1fr; gap: 16px; padding: 18px 22px 22px;
+    overflow: hidden;
+  }
+  body.bez-kursora { cursor: none; }
+
+  header { display: flex; align-items: center; gap: 16px; }
+  .znak {
+    width: 46px; height: 46px; border-radius: 12px; display: grid; place-items: center;
+    background: linear-gradient(135deg, var(--akcent), #2e7bd6); font-weight: 800; font-size: 18px; color: #06121e;
+  }
+  h1 { margin: 0; font-size: 26px; letter-spacing: .3px; }
+  .podtytul { color: var(--przygaszony); font-size: 15px; }
+  .prawo { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 8px; padding: 7px 12px; border-radius: 999px;
+    background: var(--panel); border: 1px solid var(--linia); font-size: 14px; color: var(--przygaszony);
+    font-variant-numeric: tabular-nums;
+  }
+  .kropka { width: 9px; height: 9px; border-radius: 50%; background: var(--bez); }
+  .na-zywo .kropka { background: var(--kaucja); animation: puls 1.6s infinite; }
+  @keyframes puls { 0% { box-shadow: 0 0 0 0 #2ecc7199; } 70% { box-shadow: 0 0 0 9px #2ecc7100; } 100% { box-shadow: 0 0 0 0 #2ecc7100; } }
+  button.chip { cursor: pointer; font: inherit; font-size: 14px; }
+  button.chip:hover { color: var(--tekst); }
+
+  main { display: grid; grid-template-columns: minmax(0, 1fr) clamp(320px, 30vw, 460px); gap: 18px; min-height: 0; }
+  .lewa { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 14px; min-height: 0; }
+
+  .kamera {
+    position: relative; min-height: 0; border-radius: var(--r); overflow: hidden; background: #000;
+    border: 2px solid var(--linia); transition: border-color .4s, box-shadow .4s;
+    display: grid; place-items: center;
+  }
+  .kamera img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .kamera.KAUCYJNA { border-color: var(--kaucja); box-shadow: 0 0 40px #2ecc7133; }
+  .kamera.BEZ_KAUCJI { border-color: var(--bez); box-shadow: 0 0 40px #ff5c5c33; }
+  .kamera.BRAK_KODU { border-color: var(--obroc); box-shadow: 0 0 40px #ffb02033; }
+  .nakladka { position: absolute; left: 14px; right: 14px; display: flex; gap: 8px; flex-wrap: wrap; pointer-events: none; }
+  .nakladka.gora { top: 14px; }
+  .nakladka.dol { bottom: 14px; }
+  .nakladka .chip { background: #0b0f14cc; backdrop-filter: blur(6px); color: var(--tekst); }
+  .brak-obrazu { position: absolute; color: var(--przygaszony); font-size: 18px; }
+
+  .etapy { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .etap {
+    background: var(--panel); border: 1px solid var(--linia); border-radius: 12px; padding: 12px 14px;
+    display: flex; align-items: center; gap: 12px; color: var(--przygaszony); transition: all .3s;
+  }
+  .etap .nr {
+    width: 30px; height: 30px; flex: none; border-radius: 50%; display: grid; place-items: center;
+    border: 2px solid var(--linia); font-weight: 700; font-size: 14px;
+  }
+  .etap b { display: block; color: inherit; font-size: 16px; }
+  .etap small { font-size: 12.5px; }
+  .etap.zrobiony { color: var(--tekst); }
+  .etap.zrobiony .nr { border-color: var(--akcent); color: var(--akcent); }
+  .etap.teraz { color: var(--tekst); border-color: var(--akcent); background: #4cc2ff14; }
+  .etap.teraz .nr { background: var(--akcent); border-color: var(--akcent); color: #06121e; animation: puls-a 1.4s infinite; }
+  @keyframes puls-a { 0% { box-shadow: 0 0 0 0 #4cc2ff88; } 70% { box-shadow: 0 0 0 10px #4cc2ff00; } 100% { box-shadow: 0 0 0 0 #4cc2ff00; } }
+
+  aside { display: grid; grid-template-rows: auto auto minmax(0, 1fr); gap: 14px; min-height: 0; }
+  .karta { background: var(--panel); border: 1px solid var(--linia); border-radius: var(--r); padding: 18px 20px; }
+  .etykieta { font-size: 12.5px; text-transform: uppercase; letter-spacing: 1.2px; color: var(--przygaszony); margin-bottom: 8px; }
+
+  .wynik { position: relative; overflow: hidden; min-height: 190px; display: flex; flex-direction: column; justify-content: center; }
+  .wynik .glowny { font-size: clamp(30px, 3.2vw, 46px); font-weight: 800; line-height: 1.05; }
+  .wynik .kwota { font-size: clamp(22px, 2.2vw, 32px); font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .wynik .nazwa { margin-top: 10px; font-size: 17px; }
+  .wynik .ean { margin-top: 4px; color: var(--przygaszony); font-family: ui-monospace, Consolas, monospace; letter-spacing: 1px; }
+  .wynik.KAUCYJNA { background: linear-gradient(135deg, #1b4d33, var(--panel) 70%); border-color: var(--kaucja); }
+  .wynik.KAUCYJNA .glowny, .wynik.KAUCYJNA .kwota { color: var(--kaucja); }
+  .wynik.BEZ_KAUCJI { background: linear-gradient(135deg, #4d1f22, var(--panel) 70%); border-color: var(--bez); }
+  .wynik.BEZ_KAUCJI .glowny { color: var(--bez); }
+  .wynik.BRAK_KODU { background: linear-gradient(135deg, #4d3a12, var(--panel) 70%); border-color: var(--obroc); }
+  .wynik.BRAK_KODU .glowny { color: var(--obroc); }
+  .wynik.nowy { animation: wskok .6s cubic-bezier(.2, 1.4, .4, 1); }
+  @keyframes wskok { 0% { transform: scale(.94); opacity: .4; } 100% { transform: scale(1); opacity: 1; } }
+
+  .liczby { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+  .liczba { background: var(--panel); border: 1px solid var(--linia); border-radius: 12px; padding: 12px 14px; }
+  .liczba b { display: block; font-size: clamp(24px, 2.2vw, 34px); font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .liczba span { font-size: 13px; color: var(--przygaszony); }
+  .liczba.zielona b { color: var(--kaucja); }
+
+  .historia { display: flex; flex-direction: column; min-height: 0; }
+  .historia ol { list-style: none; margin: 0; padding: 0; overflow: hidden; display: flex; flex-direction: column; gap: 8px; }
+  .historia li {
+    display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 12px;
+    padding: 10px 12px; border-radius: 10px; background: var(--panel-2);
+  }
+  .historia li.nowy { animation: wjazd .5s ease-out; }
+  @keyframes wjazd { from { transform: translateX(20px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .historia time { color: var(--przygaszony); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .historia .co { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .znaczek { font-size: 12px; font-weight: 700; padding: 4px 9px; border-radius: 999px; white-space: nowrap; }
+  .znaczek.KAUCYJNA { background: #2ecc7122; color: var(--kaucja); }
+  .znaczek.BEZ_KAUCJI { background: #ff5c5c22; color: var(--bez); }
+  .znaczek.BRAK_KODU { background: #ffb02022; color: var(--obroc); }
+  .pusto { color: var(--przygaszony); font-size: 15px; }
+
+  @media (max-width: 900px) {
+    body { overflow: auto; height: auto; }
+    main { grid-template-columns: 1fr; }
+    .kamera { aspect-ratio: 16 / 9; }
+    .etapy { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="znak">DK</div>
+  <div>
+    <h1>Dorm-Keeper</h1>
+    <div class="podtytul">Robot sprawdza, czy butelka ma kaucję: SO-101 z kamerą · YOLO11n · kod EAN</div>
+  </div>
+  <div class="prawo">
+    <span class="chip" id="polaczenie"><span class="kropka"></span><span id="polaczenie-txt">łączę…</span></span>
+    <span class="chip" id="yolo">sieć neuronowa</span>
+    <span class="chip" id="sledzenie">śledzenie</span>
+    <button class="chip" id="pelny" title="Pełny ekran (F)">⛶ pełny ekran</button>
+  </div>
+</header>
+
+<main>
+  <section class="lewa">
+    <div class="kamera" id="kamera">
+      <div class="brak-obrazu" id="brak-obrazu">Czekam na obraz z kamery…</div>
+      <img id="obraz" alt="Obraz z kamery na ramieniu SO-101">
+      <div class="nakladka gora"><span class="chip">● Kamera na ramieniu SO-101</span></div>
+      <div class="nakladka dol" id="wykrycia"></div>
+    </div>
+    <div class="etapy" id="etapy">
+      <div class="etap" data-etap="SZUKAM"><span class="nr">1</span><div><b>Szukam</b><small>sieć neuronowa wypatruje butelki</small></div></div>
+      <div class="etap" data-etap="CENTRUJE"><span class="nr">2</span><div><b>Centruję</b><small>ramię ustawia kamerę na butelce</small></div></div>
+      <div class="etap" data-etap="CZYTAM"><span class="nr">3</span><div><b>Czytam kod</b><small>kod EAN z etykiety</small></div></div>
+      <div class="etap" data-etap="WYNIK"><span class="nr">4</span><div><b>Wynik</b><small>baza kaucji</small></div></div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="karta wynik" id="wynik">
+      <div class="etykieta">Ostatnia butelka</div>
+      <div class="glowny" id="w-glowny">Czekam na butelkę</div>
+      <div class="kwota" id="w-kwota"></div>
+      <div class="nazwa" id="w-nazwa"></div>
+      <div class="ean" id="w-ean"></div>
+    </div>
+    <div class="liczby">
+      <div class="liczba"><b id="l-butelek">0</b><span>sprawdzonych</span></div>
+      <div class="liczba zielona"><b id="l-kaucyjnych">0</b><span>z kaucją</span></div>
+      <div class="liczba zielona"><b id="l-suma">0,00 zł</b><span>kaucji do odzyskania</span></div>
+    </div>
+    <div class="karta historia">
+      <div class="etykieta">Historia</div>
+      <ol id="historia"><li class="pusto">Jeszcze żadnej butelki</li></ol>
+    </div>
+  </aside>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const KOLEJNOSC = ["SZUKAM", "CENTRUJE", "CZYTAM", "WYNIK"];
+const NAPISY = { KAUCYJNA: "Z kaucją", BEZ_KAUCJI: "Bez kaucji", BRAK_KODU: "Obróć butelkę" };
+const pln = (kwota, waluta) => new Intl.NumberFormat("pl-PL", { style: "currency", currency: waluta || "PLN" }).format(kwota || 0);
+const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+// obraz: strumien MJPEG; po zerwaniu (restart programu, WiFi) laczy sie sam od nowa
+const obraz = $("obraz");
+function polacz() { obraz.src = "/podglad?czysty=1&t=" + Date.now(); }
+obraz.onload = () => $("brak-obrazu").hidden = true;
+obraz.onerror = () => { $("brak-obrazu").hidden = false; setTimeout(polacz, 1500); };
+polacz();
+
+let ostatniKlucz = null, ostatniaHistoria = null;
+
+function pokazWynik(d) {
+  const ins = d.inspekcja || {};
+  const w = ins.stan === "WYNIK" ? ins : d.ostatni_wynik;
+  const karta = $("wynik"), kamera = $("kamera");
+  const klucz = w ? `${w.czas}|${w.kod}|${w.wynik}` : null;
+  karta.className = "karta wynik" + (w ? " " + w.wynik : "");
+  kamera.className = "kamera" + (ins.stan === "WYNIK" ? " " + ins.wynik : "");
+  if (!w) return;
+  $("w-glowny").textContent = NAPISY[w.wynik] || w.wynik;
+  $("w-kwota").textContent = w.wynik === "KAUCYJNA" && w.kwota != null ? pln(w.kwota, w.waluta) : "";
+  $("w-nazwa").textContent = w.nazwa || (w.wynik === "BRAK_KODU" ? "Kodu nie widać – drugie ramię obraca butelkę" : "");
+  $("w-ean").textContent = w.kod ? "EAN " + w.kod : "";
+  if (klucz !== ostatniKlucz) {
+    if (ostatniKlucz !== null) { karta.classList.remove("nowy"); void karta.offsetWidth; karta.classList.add("nowy"); }
+    ostatniKlucz = klucz;
+  }
+}
+
+function pokazEtap(d) {
+  const etap = (d.inspekcja && d.inspekcja.stan) || "SZUKAM";
+  const i = KOLEJNOSC.indexOf(etap);
+  document.querySelectorAll(".etap").forEach((el, j) => {
+    el.classList.toggle("teraz", j === i);
+    el.classList.toggle("zrobiony", j < i);
+  });
+}
+
+function pokazHistorie(d) {
+  const h = d.historia || [];
+  const klucz = h.map(w => w.czas + w.wynik).join();
+  if (klucz === ostatniaHistoria) return;
+  const pierwszy = ostatniaHistoria !== null;
+  ostatniaHistoria = klucz;
+  $("historia").innerHTML = h.length ? h.map((w, i) => `
+    <li class="${i === 0 && pierwszy ? "nowy" : ""}">
+      <time>${esc(w.czas)}</time>
+      <span class="co">${esc(w.nazwa || (w.kod ? "EAN " + w.kod : "bez odczytu kodu"))}</span>
+      <span class="znaczek ${esc(w.wynik)}">${esc(NAPISY[w.wynik] || w.wynik)}${w.wynik === "KAUCYJNA" && w.kwota != null ? " · " + pln(w.kwota, w.waluta) : ""}</span>
+    </li>`).join("") : '<li class="pusto">Jeszcze żadnej butelki</li>';
+}
+
+async function odswiez() {
+  try {
+    const d = await (await fetch("/dane", { cache: "no-store" })).json();
+    $("polaczenie").classList.add("na-zywo");
+    $("polaczenie-txt").textContent = `na żywo · ${Math.round(d.kl_s)} kl/s`;
+    $("sledzenie").textContent = d.sledzenie ? "śledzenie włączone" : "śledzenie wyłączone";
+    $("yolo").textContent = d.yolo === "laptop" ? `szuka: YOLO na laptopie · ${Math.round(d.yolo_kl_s)} kl/s`
+      : (d.inspekcja && d.inspekcja.butelka ? "śledzi: YOLO na Raspberry Pi" : "YOLO na Raspberry Pi");
+    $("wykrycia").innerHTML = (d.wykrycia || []).slice(0, 4)
+      .map(b => `<span class="chip">sieć widzi: ${esc(b.klasa)} ${Math.round(b.pewnosc * 100)}%</span>`).join("");
+    $("l-butelek").textContent = d.licznik.butelek;
+    $("l-kaucyjnych").textContent = d.licznik.kaucyjnych;
+    $("l-suma").textContent = pln(d.licznik.suma);
+    pokazEtap(d); pokazWynik(d); pokazHistorie(d);
+  } catch (e) {
+    $("polaczenie").classList.remove("na-zywo");
+    $("polaczenie-txt").textContent = "brak połączenia";
+  }
+  setTimeout(odswiez, 400);
+}
+odswiez();
+
+// pelny ekran: przycisk albo F; kursor znika po 3 s bez ruchu
+function pelnyEkran() {
+  document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen().catch(() => {});
+}
+$("pelny").onclick = pelnyEkran;
+addEventListener("keydown", e => { if (e.key.toLowerCase() === "f") pelnyEkran(); });
+let kursor;
+addEventListener("mousemove", () => {
+  document.body.classList.remove("bez-kursora");
+  clearTimeout(kursor);
+  kursor = setTimeout(() => document.body.classList.add("bez-kursora"), 3000);
+});
+</script>
+</body>
+</html>

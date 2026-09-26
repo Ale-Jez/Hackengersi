@@ -6,6 +6,8 @@
                              Kod kreskowy czytany przy okazji: zielona ramka = butelka kaucyjna.
   python ramie.py --bez-kamery    sterowanie z terminala + ogladanie puszki pod ENTER, bez kamery
   python ramie.py --mock          bez ramienia (sama kamera, ramie stoi)
+  python ramie.py --web           bez okna: podglad, przyciski i suwaki w przegladarce http://<IP>:8765/
+                                  (wlacza sie sam na Linuksie bez monitora, np. Raspberry przez SSH)
   (port adaptera znajduje sie sam; mozna podac np. COM5)
 
 Klawisze (kliknij w okno kamery):
@@ -29,16 +31,21 @@ import ctypes
 import json
 import math
 import os
+import queue
 import socket
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 WINDOWS = sys.platform.startswith("win")
 if not WINDOWS:
     # OpenCV z Qt na Linuksie (Wayland) potrzebuje X11, inaczej okno sie nie otworzy
     os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+# bez monitora (Raspberry przez SSH / jako usluga) okno OpenCV zabiloby program - wtedy panel w przegladarce
+BEZ_OKNA = "--web" in sys.argv or (not WINDOWS and not os.environ.get("DISPLAY")
+                                   and not os.environ.get("WAYLAND_DISPLAY"))
 
 # Rejestry STS3215 (pamiec SRAM)
 ADDR_TORQUE_ENABLE = 40
@@ -325,6 +332,8 @@ WYCENTROWANY_CZAS = 0.3          # s spokojnie na srodku -> zaczyna czytac kod
 KOD_CZAS = 4.0                   # s czytania kodu -> jak nic, to "BRAK KODU - obroc butelke"
 DECYZJA_URL = ""                 # np. "http://192.168.1.30:8000/decyzja" - wynik wysylany tam automatycznie (POST JSON)
 PORT_HTTP = 8765                 # sygnal od RoArma: http://<IP>:8765/skanuj
+WEB_FPS = 20                     # najwyzej tyle klatek/s podgladu w przegladarce (reszte ogranicza WiFi)
+WEB_SZER = 640                   # szerokosc klatek podgladu: mniejsze = wiecej klatek/s przez slabe WiFi
 POZA_DOMOWA = "spoczynek"
 PLIK_POZ = "poses_so101.json"
 PLIK_KAUCJI = "kaucja.json"      # wlasna lista EAN z kaucja (oprocz api.kaucja.pl)
@@ -333,21 +342,27 @@ PLIK_KAUCJI = "kaucja.json"      # wlasna lista EAN z kaucja (oprocz api.kaucja.
 SLEDZ = True                     # startuje wlaczone
 # PLYNNE sledzenie: predkosc ramienia proporcjonalna do odleglosci celu od srodka obrazu.
 SLEDZ_PLYNNIE = True             # False = stary tryb "popraw i poczekaj" (ruch - pauza - ruch)
-SLEDZ_PETLA = 2.2                # szybkosc reakcji (1/s): wiecej = szybciej dogania, za duzo = przestrzeliwuje
-SLEDZ_MAX_V = 40.0               # st./s: najszybszy ruch przy sledzeniu
+SLEDZ_PETLA = 1.2                # szybkosc reakcji (1/s): wiecej = szybciej dogania, za duzo = przestrzeliwuje
+                                 # (bylo 2.2 przy czulosci zawyzonej 3x = w praktyce 0.7; teraz czulosc prawdziwa)
+SLEDZ_MAX_V = 30.0               # st./s: najszybszy ruch przy sledzeniu (szybciej = rozmazany obraz, kod nieczytelny)
 SLEDZ_FILTR = 0.4                # wygladzanie pozycji celu (0..1, mniej = gladziej, ale wolniej reaguje)
-CZULOSC_MIN = 0.06               # czulosc nie spadnie ponizej (za mala = za mocna reakcja = machanie)
+CZULOSC_ZAKRES = (0.6, 2.0)      # nauka czulosci tylko w tym zakresie x wartosc startowa (zmierzona) - mniejsza =
+                                 # za mocna reakcja = machanie, wieksza = ramie leniwie dogania butelke
 SLEDZ_UCZ_CZULOSC = True         # mierz na biezaco, o ile przesuwa sie obraz na 1 st. ruchu (zalezy od odleglosci)
 SLEDZ_START_PLYNNIE = 0.10       # stojace ramie rusza, gdy cel odjedzie dalej niz to (drgania wykrycia = bez ruchu)
 SLEDZ_HAMOWANIE = 0.25           # s: jak szybko wyhamowuje po chwilowej utracie celu
 SLEDZ_FF = 0.5                   # przewidywanie: jedz z predkoscia butelki (0 = wylaczone, 1 = pelne)
-SLEDZ_OPOZNIENIE = 0.3           # s: opoznienie kamery (obraz pokazuje ramie sprzed tylu sekund)
+SLEDZ_OPOZNIENIE = 0.3           # s: opoznienie kamery (obraz pokazuje ramie sprzed tylu sekund) - gdy nie znamy wieku klatki
+KAMERA_OPOZNIENIE = 0.17         # s: od polecenia dla serwa do klatki, ktora ten ruch pokazuje; zmierzone na SO-101 +
+                                 # tej kamerze: serwo rusza po ~140 ms, obraz pokazuje ruch ~45 ms pozniej.
+                                 # Program dolicza do tego wiek klatki (czas YOLO itd.)
 SLEDZ_FF_PROG = 1.0              # st./s: wolniejszy ruch butelki = szum, ignoruj
 SLEDZ_FF_GLADKOSC = 0.3          # 0..1: jak szybko przewidywanie reaguje na zmiane ruchu butelki
 # Tryb "popraw i poczekaj" (SLEDZ_PLYNNIE = False): jeden ruch w strone celu, pauza, nowa klatka, kolejny ruch.
 SLEDZ_KROK = 0.5                 # jaka czesc odleglosci do srodka pokonuje jednym ruchem (0.3 spokojnie, 0.8 szybko)
-SLEDZ_CZULOSC_POZIOM = 0.12      # start: o ile przesuwa sie kod na 1 st. podstawy (potem program sam sie uczy)
-SLEDZ_CZULOSC_PION = 0.12        # start: to samo dla nadgarstka
+SLEDZ_CZULOSC_POZIOM = 0.020     # start: o ile przesuwa sie obraz (czesc polowy szerokosci) na 1 st. podstawy -
+                                 # zmierzone: 3.2 px/st. przy 320 px (potem program sam sie douczy - zalezy od odleglosci)
+SLEDZ_CZULOSC_PION = 0.030       # start: to samo dla nadgarstka (zmierzone: 2.7 px/st. przy 180 px wysokosci)
 SLEDZ_CEL = 0.04                 # tak blisko srodka = wycentrowany, ramie staje
 SLEDZ_START = 0.16               # wycentrowany rusza sie dopiero, gdy kod ucieknie dalej niz to (bez drgan)
 SLEDZ_MIN_KROK = 0.5             # mniejszych ruchow nie robi (st.)
@@ -361,21 +376,27 @@ SLEDZ_CEL_WYSOKOSC = 0.45        # gdzie celowac w butelke: 0 = gora, 0.5 = srod
 SLEDZ_ASPEKT = {"butelka": 2.8, "puszka": 1.8}  # wysokosc/szerokosc - do szacowania ucietej butelki
 UCIETA_MAX = 1.3                 # ucieta butelka: zgadywana wielkosc najwyzej tyle razy widoczna czesc
 UCIETA_MAX_V = 12.0              # st./s: gdy butelka wystaje poza kadr, cel to tylko szacunek - jedz ostrozniej
+BLISKA_OD = 0.72                 # butelka wyzsza niz 72% kadru = tuz przed kamera: w pionie nie celuj (etykieta widac)
+SLEDZ_PRZYSP = 70.0              # st./s^2: predkosc sledzenia zmienia sie najwyzej tak szybko (plynny start i hamowanie)
 SLEDZ_PROBKI = 3                 # z ilu klatek mediana pozycji kodu
 # Wykrywanie butelek siecia neuronowa. YOLO11n (onnxruntime) widzi tez butelke czesciowo poza kadrem;
 # SSD MobileNet v2 (samo OpenCV) - zapas, gdy nie ma onnxruntime.
 DETEKTOR = "yolo"                # "yolo" albo "ssd"
 YOLO_ROZMIARY = (320, 640)       # YOLO w dwoch skalach: 320 widzi bliskie butelki, 640 dalsze
 YOLO_PRZEPLOT = True             # co klatke inna skala (wyniki drugiej z poprzedniej klatki) = 2x szybciej
+YOLO_SLEDZENIE = 320             # sledzona butelka duza w kadrze: tylko ta skala, swieza w kazdej klatce (Pi: 32 ms)
+YOLO_DUZA_OD = 0.22              # "duza" = wyzsza niz 22% obrazu (mniejsza: obie skale, bo w 320 by znikala)
 YOLO_KLASY = {39: "butelka", 41: "puszka"}   # klasy COCO w YOLO: 39 butelka, 41 kubek (tak widzi puszki)
 SLEDZ_KLASY = {44: "butelka", 47: "puszka"}  # to samo w numeracji SSD: 44 butelka, 47 kubek
 BUTELKA_PROG = 0.25              # pewnosc (0..1), zeby ZLAPAC nowa butelke
 PUSZKA_PROG = 0.50               # to samo dla "puszki" - wyzej, bo siec tak nazywa tez kubki
 BUTELKA_PROG_TRZYMAJ = 0.15      # pewnosc, zeby TRZYMAC juz sledzona (chwilowy spadek pewnosci nie gubi celu)
 MIN_BUTELKA = 0.12               # butelka nizsza niz 12% wysokosci obrazu = za daleko -> puszcza
-SLEDZ_POTWIERDZ = 3              # w ilu kolejnych klatkach musi byc widac butelke, zeby ja zlapac/przelaczyc
+SLEDZ_POTWIERDZ = 3              # w ilu kolejnych klatkach musi byc widac butelke, zeby ja zlapac
+SLEDZ_PRZELACZ_KLATEK = 8        # ... a inna butelka musi byc wyraznie blizej przez tyle klatek (~0.4 s), zeby przelaczyc
 SLEDZ_TYLKO_KAUCJA = False       # True = sledz tylko butelki z odczytanym kodem kaucyjnym
 CZYTNIK_NA_SEKUNDE = 5           # ile razy na sekunde czytac kod (wiecej = szybciej, ale obciaza procesor)
+KOD_POTWIERDZ = 2                # tyle zgodnych odczytow EAN, zeby go przyjac (1 bledny odczyt nie psuje wyniku)
 KOD_BRAK_PO = 3.0                # s bez odczytu kodu sledzonej butelki -> "obroc butelke kodem do kamery"
 SLEDZ_SZUKAJ_PO = 0.5            # s: szukaj dopiero po tylu sekundach bez kodu (pojedyncze zgubione klatki ignoruj)
 SLEDZ_SZUKAJ_CZAS = 1.5          # s: po utracie kodu jedzie dalej w strone, w ktora kod uciekal
@@ -383,6 +404,7 @@ SLEDZ_SZUKAJ_MAX = 8.0          # st.: najdalej tyle "na slepo" po utracie kodu
 SERWO_ACC = 20                   # przyspieszenie serw (mniej = lagodniej; bylo 50)
 SERWO_MARTWA_STREFA = 1          # kroki enkodera (1 = fabrycznie); wiecej = wolne ruchy ida skokami
 SLEDZ_LOG = "sledzenie.log"      # zapis przebiegu (do diagnozy); "" = bez zapisu
+SLEDZ_LOG_CO = float(os.environ.get("DK_LOG_CO", "0.3"))  # s miedzy wpisami sterowania (DK_LOG_CO=0 = co klatke)
 SLEDZ_ZNAK_POZIOM = -1           # odwroc na -1, jesli ramie UCIEKA od kodu w poziomie
 SLEDZ_ZNAK_PION = -1             # odwroc na -1, jesli ucieka w pionie
 SLEDZ_STAW_POZIOM = "pan"        # ktorym stawem celowac w poziomie
@@ -900,10 +922,53 @@ def otworz_kamere():
                 kam.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)
             kam.set(cv2.CAP_PROP_EXPOSURE, KAMERA_EKSPOZYCJA)
         if kam.isOpened() and kam.read()[0]:
-            print(f"Kamera {i} ({'laptop' if i == 0 else 'zewnetrzna'})")
+            print(f"Kamera {i}" + ((" (laptop)" if i == 0 else " (zewnetrzna)") if WINDOWS else f" (/dev/video{i})"))
             return kam
         kam.release()
     raise SO101Error("nie znalazlem zadnej kamery")
+
+
+class KameraWatek:
+    """Kamera czytana w osobnym watku: zawsze NAJNOWSZA klatka + czas, kiedy przyszla.
+
+    Bez tego sterownik kamery trzyma kolejke starych klatek (petla wolniejsza niz 30 kl/s dostaje obraz sprzed
+    100+ ms), a dekodowanie MJPEG 1080p (~25 ms) blokuje petle. Tu dekoduje sie rownolegle z YOLO.
+    """
+
+    def __init__(self, kam):
+        self.kam = kam
+        self._nowa = threading.Condition()
+        self._klatka, self._t, self._nr, self._oddana = None, 0.0, 0, 0
+        self._stop = False
+        self._watek = threading.Thread(target=self._petla, daemon=True)
+        self._watek.start()
+
+    def _petla(self):
+        while not self._stop:
+            if not self.kam.grab():  # samo odebranie klatki (bez dekodowania) - tanie
+                time.sleep(0.01)
+                continue
+            t = time.time()  # klatka wlasnie przyszla z kamery
+            if self._nr != self._oddana and t - self._t < 0.04:
+                continue  # poprzednia swieza klatka czeka na petle - nie dekoduj na zapas (procesor = cieplo)
+            ok, klatka = self.kam.retrieve()
+            if ok:
+                with self._nowa:
+                    self._klatka, self._t, self._nr = klatka, t, self._nr + 1
+                    self._nowa.notify_all()
+
+    def read(self, timeout=1.0):
+        """(ok, klatka, czas_klatki) - czeka na klatke, ktorej jeszcze nie oddal."""
+        with self._nowa:
+            if not self._nowa.wait_for(lambda: self._nr != self._oddana, timeout=timeout):
+                return False, None, 0.0
+            self._oddana = self._nr
+            return True, self._klatka, self._t
+
+    def release(self):
+        self._stop = True
+        self._watek.join(timeout=1.0)
+        self.kam.release()
 
 
 def ogladaj_puszke(arm):
@@ -957,16 +1022,210 @@ def zadanie(arm, funkcja, nazwa):
     return True
 
 
+# ----------------------------------------------------------------------------- panel w przegladarce (bez okna)
+# jpg = podglad z napisami (panel), czysty = same ramki butelek i celownik (widok /pokaz na prezentacje)
+_web = {"jpg": None, "czysty": None, "nr_jpg": 0, "nr_czysty": 0, "widzowie": 0, "widzowie_czysty": 0, "sledz": False,
+        "wykrycia": [],
+        "yolo": "lokalnie"}
+_web_nowa = threading.Condition()  # nowa klatka podgladu
+_web_klawisze = queue.SimpleQueue()  # klawisze z przegladarki -> petla glowna
+
+PANEL_HTML = """<!doctype html><html lang="pl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Ramie SO-101</title><style>
+body{margin:0;background:#111;color:#eee;font:15px system-ui,sans-serif}
+main{display:grid;grid-template-columns:minmax(0,3fr) minmax(260px,1fr);gap:12px;padding:12px}
+@media(max-width:800px){main{grid-template-columns:1fr}}
+img{width:100%;background:#000;border-radius:6px}
+#wynik{font-size:22px;font-weight:700;padding:10px;border-radius:6px;background:#333;margin:0 0 10px}
+.k{background:#1e6b1e}.b{background:#8a1c1c}.o{background:#a35c00}
+.p{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:0 0 10px}
+button{padding:10px 4px;font:inherit;border:0;border-radius:6px;background:#2d2d2d;color:#eee;touch-action:none}
+button:active,button.on{background:#0a6ebd}#stop{background:#8a1c1c}
+h3{margin:12px 0 6px;font-size:13px;color:#aaa;text-transform:uppercase}
+label{display:grid;grid-template-columns:1fr 48px;font-size:13px;margin:2px 0}input{grid-column:1/3}
+small{color:#888}</style></head><body><main><div><img src="/podglad" alt="podglad kamery">
+<small>Klawiatura dziala jak w oknie: W/S R/F A/D J/L U/O, 1/2/3, B stop, T sledzenie, M, H, Y, Enter</small></div>
+<div><div id="wynik">...</div><div class="p"><button id="obr">Obrocono</button><button data-k="t" id="sl">Sledzenie</button>
+<button data-k="b" id="stop">STOP</button></div>
+<h3>Ruch (przytrzymaj)</h3><div class="p">
+<button data-h="j">J pochyl</button><button data-h="w">W gora</button><button data-h="l">L pochyl</button>
+<button data-h="a">A lewo</button><button data-h="s">S dol</button><button data-h="d">D prawo</button>
+<button data-h="r">R dalej</button><button data-h="f">F blizej</button><span></span>
+<button data-h="u">U obroc</button><span></span><button data-h="o">O obroc</button></div>
+<div class="p"><button data-k="1">wolno</button><button data-k="2">srednio</button><button data-k="3">szybko</button></div>
+<h3>Pozy</h3><div class="p"><button data-k="m">M tu czekaj</button><button data-k="h">H dom</button>
+<button data-k="y">Y historia</button></div><h3>Ustawienia</h3><div id="suwaki"></div></div></main><script>
+const k=c=>fetch('/klawisz?k='+encodeURIComponent(c));let trzymane={};
+function wcisnij(c){if(trzymane[c])return;k(c);trzymane[c]=setInterval(()=>k(c),1000/30)}
+function pusc(c){clearInterval(trzymane[c]);delete trzymane[c]}
+function puscWszystko(){Object.keys(trzymane).forEach(pusc)}
+document.querySelectorAll('[data-h]').forEach(b=>{const c=b.dataset.h;
+ b.onpointerdown=e=>{b.setPointerCapture(e.pointerId);wcisnij(c)};b.onpointerup=b.onpointercancel=()=>pusc(c)});
+document.querySelectorAll('[data-k]').forEach(b=>b.onclick=()=>k(b.dataset.k));
+document.getElementById('obr').onclick=()=>fetch('/obrocono');
+const RUCH='wsrfadjluo',AKCJE='123btmhycp';
+onkeydown=e=>{if(e.target.tagName=='INPUT')return;const c=e.key.toLowerCase();
+ if(RUCH.includes(c)&&c.length==1){wcisnij(c);e.preventDefault()}
+ else if(AKCJE.includes(c)&&c.length==1&&!e.repeat)k(c);else if(e.key=='Enter'&&!e.repeat)k('\\r')};
+onkeyup=e=>pusc(e.key.toLowerCase());onblur=puscWszystko;
+fetch('/ustawienia').then(r=>r.json()).then(s=>{const d=document.getElementById('suwaki');s.forEach((u,i)=>{
+ const l=document.createElement('label');l.innerHTML=`<span>${u.napis}</span><b>${u.v}</b>
+ <input type=range min=${u.lo} max=${u.hi} value=${u.v}>`;const r=l.querySelector('input');
+ r.oninput=()=>l.querySelector('b').textContent=r.value;r.onchange=()=>fetch(`/ustaw?i=${i}&v=${r.value}`);d.append(l)})});
+async function odswiez(){try{const w=await(await fetch('/wynik')).json(),e=document.getElementById('wynik');
+ const o=w.stan=='WYNIK'?w:(w.ostatni_wynik||{});const t={KAUCYJNA:'k',BEZ_KAUCJI:'b',BRAK_KODU:'o'};
+ e.className=w.stan=='WYNIK'?(t[w.wynik]||''):'';
+ e.textContent=w.stan=='WYNIK'?`${w.wynik}${w.kwota!=null?' '+w.kwota.toFixed(2)+' '+w.waluta:''} ${w.nazwa||w.kod||''}`
+  :`${w.stan}${o.wynik?' | ostatni: '+o.wynik+' '+(o.kod||''):''}`;
+ document.getElementById('sl').classList.toggle('on',!!w.sledzenie)}catch(e){}setTimeout(odswiez,700)}odswiez();
+</script></body></html>"""
+
+
+def _ustaw_suwak(i, v):
+    """Suwak nr i (z okna albo z przegladarki) -> ustawienie w programie."""
+    napis, zmienna, lo, hi, mn = SUWAKI[i]
+    v = min(max(int(v), lo), hi)
+    if zmienna is None:
+        _web_klawisze.put("sledz1" if v else "sledz0")
+    else:
+        globals()[zmienna] = bool(v) if zmienna in ("SLEDZ_TYLKO_KAUCJA", "SLEDZ_PLYNNIE") else v * mn
+
+
+def _stan_suwakow():
+    out = []
+    for napis, zmienna, lo, hi, mn in SUWAKI:
+        v = int(_web["sledz"]) if zmienna is None else int(round(float(globals()[zmienna]) / mn))
+        out.append({"napis": napis, "lo": lo, "hi": hi, "v": min(max(v, lo), hi)})
+    return out
+
+
+def web_klatka(ekran, czysty=False):
+    """Podaj klatke do podgladu w przegladarce (tylko gdy ktos patrzy - JPEG kosztuje procesor)."""
+    import cv2
+
+    if ekran.shape[1] > WEB_SZER:  # mniej danych przez WiFi = plynniejszy podglad
+        ekran = cv2.resize(ekran, (WEB_SZER, ekran.shape[0] * WEB_SZER // ekran.shape[1]), interpolation=cv2.INTER_AREA)
+    ok, jpg = cv2.imencode(".jpg", ekran, [cv2.IMWRITE_JPEG_QUALITY, 65])
+    if ok:
+        klucz = "czysty" if czysty else "jpg"
+        with _web_nowa:  # osobny licznik na strumien - inaczej kazdy wysylalby tez klatki drugiego (2x WiFi)
+            _web[klucz], _web["nr_" + klucz] = jpg.tobytes(), _web.get("nr_" + klucz, 0) + 1
+            _web_nowa.notify_all()
+
+
+def _dane_pokazu():
+    """Wszystko dla widoku /pokaz: etap, wynik, co widzi siec, historia i liczniki butelek."""
+    wyniki = list(stan.get("wyniki", {}).values())  # ostatni wynik kazdej butelki
+    kaucyjne = [w for w in wyniki if w["wynik"] == "KAUCYJNA"]
+    return {
+        "inspekcja": stan.get("inspekcja") or {"stan": "SZUKAM"},
+        "ostatni_wynik": stan.get("ostatni_wynik"),
+        "historia": stan.get("historia", [])[-12:][::-1],
+        "licznik": {"butelek": len(wyniki), "kaucyjnych": len(kaucyjne),
+                    "bez_kaucji": sum(w["wynik"] == "BEZ_KAUCJI" for w in wyniki),
+                    "suma": round(sum(w["kwota"] or 0 for w in kaucyjne), 2)},
+        "wykrycia": _web["wykrycia"], "sledzenie": _web["sledz"], "kl_s": stan.get("kl_s", 0),
+        "yolo": _web.get("yolo", "lokalnie"), "yolo_kl_s": _zdalny["kl_s"], "laptop": yolo_laptop_aktywny(),
+    }
+
+
 def serwer_http(arm):
     class Obsluga(BaseHTTPRequestHandler):
+        # polaczenie zostaje otwarte miedzy zapytaniami (laptop z YOLO: bez nowego TCP na kazda klatke),
+        # a male pakiety ida od razu (Nagle + opozniony ACK Windows = nawet 200 ms na odpowiedz)
+        protocol_version = "HTTP/1.1"
+        disable_nagle_algorithm = True
+
         def _json(self, dane, kod=200):
+            tresc = json.dumps(dane, ensure_ascii=False).encode()
             self.send_response(kod)
             self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(tresc)))
             self.end_headers()
-            self.wfile.write(json.dumps(dane, ensure_ascii=False).encode())
+            self.wfile.write(tresc)
+
+        def _podglad(self, czysty=False):
+            """MJPEG: przegladarka pokazuje to jak film (<img src="/podglad">)."""
+            self.close_connection = True  # strumien bez konca - po nim polaczenie sie zamyka
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=klatka")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            licznik = "widzowie_czysty" if czysty else "widzowie"
+            klucz = "czysty" if czysty else "jpg"
+            _web[licznik] += 1
+            nr = -1
+            try:
+                while True:
+                    with _web_nowa:
+                        _web_nowa.wait_for(lambda: _web.get("nr_" + klucz, 0) != nr, timeout=2)
+                        jpg, nr = _web[klucz], _web.get("nr_" + klucz, 0)
+                    if jpg:
+                        self.wfile.write(b"--klatka\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n"
+                                         % len(jpg) + jpg + b"\r\n")
+            except OSError:  # przegladarka zamknieta
+                pass
+            finally:
+                _web[licznik] -= 1
 
         def do_GET(self):
-            if self.path.startswith("/skanuj"):
+            adres = urlsplit(self.path)
+            q = {k: v[0] for k, v in parse_qs(adres.query).items()}
+            # tresc zawsze przeczytac - przy otwartym polaczeniu inaczej zostalaby jako "nastepne zapytanie"
+            dlugosc = int(self.headers.get("Content-Length") or 0)
+            cialo = self.rfile.read(dlugosc) if dlugosc > 0 else b""
+            if adres.path == "/":
+                tresc = PANEL_HTML.encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(tresc)))
+                self.end_headers()
+                self.wfile.write(tresc)
+            elif adres.path == "/podglad":
+                self._podglad(czysty="czysty" in q)
+            elif adres.path == "/pokaz":  # widok na prezentacje (plik czytany za kazdym razem - mozna go edytowac)
+                try:
+                    with open(os.path.join(_katalog, "pokaz.html"), "rb") as f:
+                        tresc = f.read()
+                except FileNotFoundError:
+                    return self._json({"blad": "brak pokaz.html obok ramie.py"}, 404)
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(tresc)))
+                self.end_headers()
+                self.wfile.write(tresc)
+            elif adres.path == "/dane":
+                self._json(_dane_pokazu())
+            elif adres.path == "/yolo":  # laptop: wynik YOLO poprzedniej klatki -> w odpowiedzi nastepna klatka
+                try:
+                    wynik_nr = int(q.get("nr", 0))
+                except ValueError:
+                    wynik_nr = 0
+                _yolo_od_laptopa(cialo, wynik_nr)
+                jpg, nr = _yolo_klatka()
+                if jpg is None:
+                    self.send_response(204)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(jpg)))
+                self.send_header("X-Nr", str(nr))
+                self.end_headers()
+                self.wfile.write(jpg)
+            elif adres.path == "/klawisz" and q.get("k"):
+                _web_klawisze.put(q["k"][:1].lower())
+                self._json({"ok": True})
+            elif adres.path == "/ustawienia":
+                self._json(_stan_suwakow())
+            elif adres.path == "/ustaw" and "i" in q and "v" in q:
+                try:
+                    _ustaw_suwak(int(q["i"]), q["v"])
+                except (ValueError, IndexError):
+                    return self._json({"blad": "zly suwak"}, 400)
+                self._json({"ok": True})
+            elif self.path.startswith("/skanuj"):
                 print("\nSYGNAL z sieci")
                 if not zadanie(arm, ogladaj_puszke, "skan"):
                     return self._json({"blad": "ramie zajete"}, 409)
@@ -976,7 +1235,7 @@ def serwer_http(arm):
                 self._json(stan)
             elif self.path.startswith("/wynik"):  # wynik inspekcji butelki (kaucja / bez / obroc)
                 self._json(dict(stan.get("inspekcja") or {"stan": "brak inspekcji"},
-                                ostatni_wynik=stan.get("ostatni_wynik")))
+                                ostatni_wynik=stan.get("ostatni_wynik"), sledzenie=_web["sledz"]))
             elif self.path.startswith("/obrocono"):  # butelka obrocona - czytaj kod od nowa
                 if _inspekcja:
                     _inspekcja.po_obrocie()
@@ -989,7 +1248,15 @@ def serwer_http(arm):
         def log_message(self, *a):
             pass
 
-    srv = ThreadingHTTPServer(("0.0.0.0", PORT_HTTP), Obsluga)
+    class Serwer(ThreadingHTTPServer):
+        daemon_threads = True
+
+        def handle_error(self, request, client_address):
+            if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+                return  # przegladarka albo laptop rozlaczyl sie w trakcie - normalne, bez smiecenia w logu
+            super().handle_error(request, client_address)
+
+    srv = Serwer(("0.0.0.0", PORT_HTTP), Obsluga)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv
 
@@ -1102,6 +1369,8 @@ class CzytnikKodow:
         self._cel = None
         self.kody = []         # ostatnie kody z calego obrazu
         self.kod_celu = {}     # id sledzonej butelki -> odczytany EAN
+        self._glosy = {}       # id butelki -> {EAN: ile razy odczytany}
+        self.pewne = set()     # EAN-y potwierdzone (KOD_POTWIERDZ zgodnych odczytow) - te wystarczy przeczytac raz
         self._stop = False
         self.pauza = False     # True = nic nie czytaj (wynik juz rozstrzygniety)
         self._ost = 0.0
@@ -1153,7 +1422,15 @@ class CzytnikKodow:
                                 if ean:
                                     break
                 if ean:
-                    self.kod_celu[cid] = ean
+                    # pojedynczy odczyt bywa bledny (pomylone cyfry, a suma kontrolna przypadkiem sie zgadza -
+                    # tak wyszlo "0415191856075" zamiast 8445291856035): przyjmij dopiero zgodne odczyty
+                    if len(self._glosy) > 200:
+                        self._glosy.clear()
+                    glosy = self._glosy.setdefault(cid, {})
+                    glosy[ean] = glosy.get(ean, 0) + 1
+                    if glosy[ean] >= KOD_POTWIERDZ or ean in self.pewne:
+                        self.pewne.add(ean)
+                        self.kod_celu[cid] = ean
             except Exception as e:  # czytnik nie moze wywalic calego programu
                 print("\nczytnik kodow:", e)
 
@@ -1213,7 +1490,8 @@ def _log(tekst):
 
         _kolejka_logu = queue.Queue()
         threading.Thread(target=_pisz_log, args=(_kolejka_logu,), daemon=True).start()
-    _kolejka_logu.put(f"{time.strftime('%H:%M:%S')} {tekst}\n")
+    teraz = time.time()
+    _kolejka_logu.put(f"{time.strftime('%H:%M:%S', time.localtime(teraz))}.{int(teraz * 1000) % 1000:03d} {tekst}\n")
 
 
 class Sledzenie:
@@ -1338,6 +1616,16 @@ class Sledzenie:
         self._t_ost = teraz
         return dt
 
+    def _opoznienie(self):
+        """Sprzed ilu sekund jest ruch ramienia, ktory widac na obrazie (znany wiek klatki -> dokladnie)."""
+        return getattr(self, "_opozn", None) or SLEDZ_OPOZNIENIE
+
+    def zmierz_opoznienie(self, t_klatki, teraz):
+        """Wiek biezacej klatki + stale opoznienie serwa i kamery (wygladzone - bez skokow)."""
+        o = KAMERA_OPOZNIENIE + max(0.0, teraz - t_klatki)
+        stare = getattr(self, "_opozn", None)
+        self._opozn = o if stare is None else stare + 0.2 * (o - stare)
+
     def _jedz(self, st, dt):
         """Przesun cele stawow o predkosc * dt; serwo dostaje predkosc dopasowana do ruchu."""
         stawy = {"x": SLEDZ_STAW_POZIOM, "y": SLEDZ_STAW_PION}
@@ -1370,7 +1658,7 @@ class Sledzenie:
         # predkosc samej butelki w obrazie = zmiana obrazu minus to, co zrobil nasz wlasny ruch
         # (kamera pokazuje nasz ruch z opoznieniem SLEDZ_OPOZNIENIE)
         if self._poprz_f is not None and dt > 0:
-            w_wtedy = next((w for t, w in reversed(self._hist_w) if t <= teraz - SLEDZ_OPOZNIENIE),
+            w_wtedy = next((w for t, w in reversed(self._hist_w) if t <= teraz - self._opoznienie()),
                            {"x": 0.0, "y": 0.0})
             for i, o in enumerate(("x", "y")):
                 v_butelki = (self._filtr[i] - self._poprz_f[i]) / dt - self.g[o] * w_wtedy[o]
@@ -1389,17 +1677,19 @@ class Sledzenie:
             uc = getattr(self, "_uciete", {})
             ucieta = (uc.get("gora") or uc.get("dol")) if o == "y" else (uc.get("lewa") or uc.get("prawa"))
             v_max = UCIETA_MAX_V if ucieta else SLEDZ_MAX_V  # cel to tylko szacunek -> ostrozniej
-            self._w[o] = max(-v_max, min(v_max, w))
+            w = max(-v_max, min(v_max, w))
+            dw = SLEDZ_PRZYSP * dt  # predkosc zmienia sie stopniowo: plynny start i hamowanie, bez szarpniec
+            self._w[o] += max(-dw, min(dw, w - self._w[o]))
         self._hist_w = [h for h in self._hist_w if teraz - h[0] < 1.0] + [(teraz, dict(self._w))]
         if SLEDZ_UCZ_CZULOSC:
             self._ucz_czulosc(st, teraz)
         self._jedz(st, dt)
-        if teraz - getattr(self, "_log_t", 0.0) > 0.3:
+        if teraz - getattr(self, "_log_t", 0.0) > SLEDZ_LOG_CO:
             self._log_t = teraz
             _log(f"cel={self.cel} x={self._filtr[0]:+.2f} y={self._filtr[1]:+.2f} {getattr(self, 'zrodlo', '?')} "
                  f"pan={st.here['pan']:.1f} wflex={st.here['wflex']:.1f} "
                  f"predkosc pan={self._w['x']:+.1f} wflex={self._w['y']:+.1f} st/s "
-                 f"czulosc x={self.g['x']:+.3f} y={self.g['y']:+.3f}")
+                 f"czulosc x={self.g['x']:+.3f} y={self.g['y']:+.3f} opozn={self._opoznienie():.2f}")
         return msg
 
     def _ucz_czulosc(self, st, teraz):
@@ -1422,7 +1712,7 @@ class Sledzenie:
         def wpis(t):
             return next((x for x in reversed(h) if x[0] <= t), None)
 
-        okno, opozn = 0.4, SLEDZ_OPOZNIENIE
+        okno, opozn = 0.4, self._opoznienie()
         teraz_e, stary_e = h[-1], wpis(teraz - okno)
         teraz_k, stary_k = wpis(teraz - opozn), wpis(teraz - okno - opozn)
         if not (stary_e and teraz_k and stary_k):
@@ -1436,7 +1726,8 @@ class Sledzenie:
             g_obs = (teraz_e[1][i] - stary_e[1][i]) / dth
             if g_obs * self.g[o] > 0 and 0.25 <= g_obs / self.g[o] <= 4.0:
                 g = self.g[o] + 0.3 * (g_obs - self.g[o])
-                self.g[o] = math.copysign(min(max(abs(g), CZULOSC_MIN), 0.6), g)
+                start = SLEDZ_CZULOSC_POZIOM if o == "x" else SLEDZ_CZULOSC_PION
+                self.g[o] = math.copysign(min(max(abs(g), CZULOSC_ZAKRES[0] * start), CZULOSC_ZAKRES[1] * start), g)
 
     def _szukaj_plynnie(self, st, teraz):
         """Cel chwilowo niewidoczny: jesli uciekal - jedz dalej za nim, inaczej plynnie wyhamuj."""
@@ -1719,6 +2010,79 @@ def pobierz_yolo():
     return sciezka
 
 
+# ----------------------------------------------------------------------------- YOLO liczone na laptopie
+# Na Raspberry YOLO daje ~10 kl/s. Laptop (yolo_laptop.py) sam laczy sie tutaj: POST /yolo z wynikiem poprzedniej
+# klatki, w odpowiedzi dostaje nastepna (pomniejszona). Laptop nic nie nasluchuje = zapora Windows nie przeszkadza.
+# Laptop sie nie odzywa dluzej niz ZDALNY_YOLO_CISZA -> YOLO znowu liczone tutaj.
+ZDALNY_YOLO_ROZMIAR = 640        # dluzszy bok klatki dla laptopa (= najwieksza skala YOLO, wiec wynik ten sam)
+ZDALNY_YOLO_CISZA = 0.5          # s
+ZDALNY_YOLO_CZEKAJ = 0.15        # s: petla czeka tyle na swiezy wynik (1 obieg = 1 nowe wykrycie, jak lokalnie)
+# nr = ostatnia wystawiona klatka, wydany = ostatnia zabrana przez laptopa (dwa watki laptopa = rozne klatki),
+# wynik_nr = klatka, z ktorej jest wynik, oddany_nr = wynik juz podany petli
+_zdalny = {"jpg": None, "nr": 0, "wydany": 0, "skala": 1.0, "wynik": [], "wynik_nr": 0, "oddany_nr": 0,
+           "pyta": 0.0, "t": 0.0, "kl_s": 0.0}
+_zdalny_nowa = threading.Condition()
+
+
+def _yolo_dla_laptopa(klatka):
+    """Wystaw klatke dla laptopa i zwroc najswiezsze wykrycia od niego (z klatki sprzed 1-2 obiegow)."""
+    import cv2
+
+    h, w = klatka.shape[:2]
+    s = min(1.0, ZDALNY_YOLO_ROZMIAR / max(h, w))
+    maly = cv2.resize(klatka, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA) if s < 1 else klatka
+    ok, jpg = cv2.imencode(".jpg", maly, [cv2.IMWRITE_JPEG_QUALITY, 75])
+    with _zdalny_nowa:
+        if ok:
+            _zdalny.update(jpg=jpg.tobytes(), nr=_zdalny["nr"] + 1, skala=s)
+            _zdalny_nowa.notify_all()
+        # sledzenie liczy predkosc z kolejnych wykryc - to samo wykrycie kilka razy pod rzad by je oszukalo
+        _zdalny_nowa.wait_for(lambda: _zdalny["wynik_nr"] > _zdalny["oddany_nr"], timeout=ZDALNY_YOLO_CZEKAJ)
+        _zdalny["oddany_nr"] = _zdalny["wynik_nr"]
+        if time.time() - _zdalny["t"] > 0.5:
+            return []  # wynik sprzed przerwy (np. sprzed sledzenia) - butelki moga byc juz gdzie indziej
+        return [dict(b) for b in _zdalny["wynik"]]  # kopie: petla dopisuje do nich "ean"
+
+
+def _yolo_od_laptopa(tresc, wynik_nr):
+    """Wykrycia od laptopa (we wspolrzednych pomniejszonej klatki) -> piksele pelnej klatki."""
+    _zdalny["pyta"] = time.time()
+    if not tresc or wynik_nr <= _zdalny["wynik_nr"]:  # pusty albo spozniony (drugi watek byl szybszy)
+        return
+    try:
+        butelki = json.loads(tresc)
+        k = 1.0 / _zdalny["skala"]
+        wynik = [{"cx": float(b["cx"]) * k, "cy": float(b["cy"]) * k, "w": float(b["w"]) * k, "h": float(b["h"]) * k,
+                  "pewnosc": float(b["pewnosc"]), "klasa": b["klasa"], "ean": None,
+                  "box": tuple(int(v * k) for v in b["box"])}
+                 for b in butelki if b.get("klasa") in ("butelka", "puszka")]
+    except (ValueError, KeyError, TypeError):
+        return
+    teraz = time.time()
+    with _zdalny_nowa:
+        if wynik_nr <= _zdalny["wynik_nr"]:
+            return
+        if _zdalny["t"]:
+            _zdalny["kl_s"] = round(0.8 * _zdalny["kl_s"] + 0.2 / max(teraz - _zdalny["t"], 1e-3), 1)
+        _zdalny.update(wynik=wynik, wynik_nr=wynik_nr, t=teraz)
+        _zdalny_nowa.notify_all()
+
+
+def _yolo_klatka():
+    """Czekaj (max 1 s) na klatke, ktorej zaden watek laptopa jeszcze nie wzial. (jpg, nr) albo (None, 0)."""
+    with _zdalny_nowa:
+        for _ in range(5):  # czekajacy laptop tez jest "obecny" (przy sledzeniu Pi nie wystawia klatek)
+            _zdalny["pyta"] = time.time()
+            if _zdalny_nowa.wait_for(lambda: _zdalny["nr"] > _zdalny["wydany"] and _zdalny["jpg"], timeout=0.2):
+                _zdalny["wydany"] = _zdalny["nr"]
+                return _zdalny["jpg"], _zdalny["nr"]
+        return None, 0
+
+
+def yolo_laptop_aktywny():
+    return time.time() - _zdalny["pyta"] < ZDALNY_YOLO_CISZA
+
+
 class DetektorButelek:
     """Butelki (i puszki) w klatce: [{"cx","cy","w","h","pewnosc","klasa","box"}] w pikselach.
 
@@ -1733,6 +2097,10 @@ class DetektorButelek:
 
                 opcje = ort.SessionOptions()
                 opcje.intra_op_num_threads = max(1, min(4, (os.cpu_count() or 4) // 2))
+                # watki onnxruntime domyslnie kreca sie w kolko miedzy klatkami (100% rdzenia za nic) -
+                # na Raspberry bez wentylatora to przegrzanie i zbicie zegara z 2.4 do 1.5 GHz
+                opcje.add_session_config_entry("session.intra_op.allow_spinning", "0")
+                opcje.add_session_config_entry("session.inter_op.allow_spinning", "0")
                 self.yolo = ort.InferenceSession(pobierz_yolo(), opcje, providers=["CPUExecutionProvider"])
                 self.wejscie = self.yolo.get_inputs()[0].name
                 print("Wykrywanie butelek: YOLO11n")
@@ -1756,15 +2124,21 @@ class DetektorButelek:
         return {"cx": (x0 + x1) / 2, "cy": (y0 + y1) / 2, "w": x1 - x0, "h": y1 - y0,
                 "pewnosc": float(pewnosc), "klasa": klasa, "box": (int(x0), int(y0), int(x1), int(y1)), "ean": None}
 
-    def _wykryj_yolo(self, klatka):
-        """YOLO w kilku skalach (bliska butelka lepiej wychodzi w malej, daleka w duzej) + wspolne NMS."""
+    def _wykryj_yolo(self, klatka, rozmiary=None):
+        """YOLO w kilku skalach (bliska butelka lepiej wychodzi w malej, daleka w duzej) + wspolne NMS.
+
+        rozmiary = tylko te skale, wszystkie swieze w tej klatce (sledzenie duzej butelki - bez wynikow z pamieci).
+        """
         import cv2
         import numpy as np
 
         h, w = klatka.shape[:2]
         prog = min(BUTELKA_PROG, BUTELKA_PROG_TRZYMAJ)
         ramki, oceny, klasy = [], [], []
-        if YOLO_PRZEPLOT and len(YOLO_ROZMIARY) > 1:
+        if rozmiary:
+            skale = list(rozmiary)
+            self._pamiec = {}  # po powrocie do przeplotu nie mieszaj ze starymi ramkami
+        elif YOLO_PRZEPLOT and len(YOLO_ROZMIARY) > 1:
             # w tej klatce jedna skala, pozostale z pamieci (z poprzednich klatek - przesuniecie znikome)
             self._nr = (getattr(self, "_nr", -1) + 1) % len(YOLO_ROZMIARY)
             skale = [YOLO_ROZMIARY[self._nr]]
@@ -1807,11 +2181,22 @@ class DetektorButelek:
                     wyniki.append(wpis)
         return wyniki
 
-    def wykryj(self, klatka):
+    def wykryj(self, klatka, sledzi=False, duza=False):
+        """sledzi = ramie trzyma butelke (liczy sie kazda klatka: tylko tutaj, bez WiFi);
+        duza = sledzona butelka duza w kadrze -> sama mala skala, swieza w kazdej klatce (szybko i bez skokow)."""
         import cv2
 
+        # laptop tylko do wypatrywania butelek: przy sledzeniu opoznienie WiFi (60-400 ms, zmienne) rozbujaloby ramie
+        zdalnie = yolo_laptop_aktywny() and not sledzi
+        _web["yolo"] = "laptop" if zdalnie else "lokalnie"  # napis na obrazie i w /pokaz
+        if zdalnie != getattr(self, "_zdalnie", False):
+            self._zdalnie = zdalnie
+            if yolo_laptop_aktywny():
+                print(f"\nYOLO: {'laptop (szukam butelki)' if zdalnie else 'tutaj (sledze butelke - bez opoznien WiFi)'}")
+        if zdalnie:
+            return _yolo_dla_laptopa(klatka)
         if self.yolo is not None:
-            return self._wykryj_yolo(klatka)
+            return self._wykryj_yolo(klatka, (YOLO_SLEDZENIE,) if sledzi and duza else None)
         h, w = klatka.shape[:2]
         self.net.setInput(cv2.dnn.blobFromImage(klatka, size=(300, 300), swapRB=True))
         wyniki = []
@@ -1884,6 +2269,10 @@ class Inspekcja:
     def __init__(self, st):
         teraz = time.time()
         self.srodek = {SLEDZ_STAW_POZIOM: st.here[SLEDZ_STAW_POZIOM], SLEDZ_STAW_PION: st.here[SLEDZ_STAW_PION]}
+        zapisana = wczytaj(PLIK_POZ, {}).get(POZA_DOMOWA)
+        if zapisana and all(abs(zapisana[j] - st.here[j]) < 10 for j in ("lift", "elbow")):
+            # po restarcie czekaj tam, gdzie ustawiono M (ramie w tej samej postawie), a nie gdzie akurat stalo
+            self.srodek = {j: zapisana[j] for j in (SLEDZ_STAW_POZIOM, SLEDZ_STAW_PION)}
         self.stan, self.od, self.bez_celu_od = "SZUKAM", teraz, teraz
         self.cel, self.wynik, self.wycentrowany_od = None, None, None
         self.punkt, self._t = 0, None
@@ -1906,6 +2295,13 @@ class Inspekcja:
         self.stan = "WYNIK"
         stan["inspekcja"] = dict(self.wynik, stan="WYNIK")
         stan["ostatni_wynik"] = dict(self.wynik)  # zostaje, nawet gdy butelka zniknie z kadru
+        # widok /pokaz: historia zdarzen + ostatni wynik kazdej butelki (po obrocie BRAK_KODU -> KAUCYJNA = 1 butelka)
+        stan["historia"] = (stan.get("historia", []) + [dict(self.wynik)])[-50:]
+        wyniki = stan.setdefault("wyniki", {})
+        wyniki.pop(self.cel, None)
+        wyniki[self.cel] = dict(self.wynik)
+        while len(wyniki) > 200:
+            wyniki.pop(next(iter(wyniki)))
         print(f"\n=== WYNIK: {wynik} {self.wynik['kod'] or ''} {self.wynik['nazwa']} ===")
         _log(f"WYNIK {self.wynik}")
         if DECYZJA_URL:  # w tle - nie blokuje sledzenia
@@ -2037,8 +2433,21 @@ class SledzenieButelek(Sledzenie):
     def _blisko(self, b, cx, cy, szer):
         return abs(b["cx"] - cx) + abs(b["cy"] - cy) < SLEDZ_PROMIEN * szer
 
-    def krok(self, butelki, kaucje, szer, wys, st):
+    @staticmethod
+    def _nakladaja(a, b):
+        """Dwie ramki jednej butelki (np. cala + sam kawalek): srodek jednej w drugiej albo wiekszosc wspolna."""
+        ax0, ay0, ax1, ay1 = a["box"]
+        bx0, by0, bx1, by1 = b["box"]
+        if (ax0 <= b["cx"] <= ax1 and ay0 <= b["cy"] <= ay1) or (bx0 <= a["cx"] <= bx1 and by0 <= a["cy"] <= by1):
+            return True
+        wspolne = max(0, min(ax1, bx1) - max(ax0, bx0)) * max(0, min(ay1, by1) - max(ay0, by0))
+        return wspolne > 0.5 * min((ax1 - ax0) * (ay1 - ay0), (bx1 - bx0) * (by1 - by0))
+
+    def krok(self, butelki, kaucje, szer, wys, st, t_klatki=None):
+        """t_klatki = kiedy kamera zrobila te klatke (dokladne opoznienie do przewidywania ruchu)."""
         teraz = time.time()
+        if t_klatki:
+            self.zmierz_opoznienie(t_klatki, teraz)
         msg = None
 
         def pasuje(b):
@@ -2054,6 +2463,8 @@ class SledzenieButelek(Sledzenie):
             bliskie = [b for b in butelki if self._blisko(b, self.xy[0], self.xy[1], szer)]
             biezacy = min(bliskie, key=lambda b: abs(b["cx"] - self.xy[0]) + abs(b["cy"] - self.xy[1]),
                           default=None)
+            if biezacy is not None:  # ta sama butelka wykryta 2 razy (cala + kawalek) -> zawsze cala, bez skakania
+                biezacy = max((b for b in butelki if self._nakladaja(b, biezacy)), key=lambda b: b["w"] * b["h"])
 
         if self.cel is None:
             if najwieksza:  # potwierdz w kilku klatkach - jedno falszywe wykrycie nie rusza ramieniem
@@ -2065,21 +2476,23 @@ class SledzenieButelek(Sledzenie):
                 if self._kand_n >= SLEDZ_POTWIERDZ:
                     self._nr += 1
                     self.cel, biezacy, self.ean = f"butelka{self._nr}", najwieksza, None
+                    self._inny_n = 0
                     msg = f"SLEDZE {self.cel}"
             else:
                 self._kand, self._kand_n = None, 0
         elif biezacy is not None:
             if biezacy["h"] < MIN_BUTELKA * wys:
                 msg, self.cel, biezacy = f"{self.cel} ODDALILA SIE - puszczam", None, None
-            elif najwieksza is not None and najwieksza is not biezacy and (
+            elif najwieksza is not None and najwieksza is not biezacy and not self._nakladaja(najwieksza, biezacy) and (
                     (najwieksza["klasa"] == "butelka") > (biezacy["klasa"] == "butelka")
                     or (najwieksza["klasa"] == biezacy["klasa"]
                         and self._pole(najwieksza)[1] > self._pole(biezacy)[1] * PRZELACZ_GDY)):
                 self._inny_n += 1
-                if self._inny_n >= SLEDZ_POTWIERDZ:
+                if self._inny_n >= SLEDZ_PRZELACZ_KLATEK:
                     self._nr += 1
                     stary = self.cel
                     self.cel, biezacy, self.ean = f"butelka{self._nr}", najwieksza, None
+                    self._inny_n = 0  # bez tego przelaczal sie znowu juz w nastepnej klatce (serie INNA BLIZEJ)
                     msg = f"INNA BLIZEJ: {stary} -> {self.cel}"
             else:
                 self._inny_n = 0
@@ -2114,6 +2527,12 @@ class SledzenieButelek(Sledzenie):
                 k = self.kod_wzgl
                 self.kod_wzgl = rel if k is None else (k[0] + 0.3 * (rel[0] - k[0]), k[1] + 0.3 * (rel[1] - k[1]))
         px, py = punkt_celowania(biezacy, szer, wys, self._uciete, self.kod_wzgl if SLEDZ_CEL_W_KOD else None)
+        # butelka tuz przed kamera (wiekszosc wysokosci kadru): etykieta i tak jest w kadrze, a zgadywany srodek
+        # ucietej butelki skacze (bylo: nadgarstek -12 -> +12 st/s) - w pionie stoj, centruj tylko w poziomie
+        h_rel = biezacy["h"] / wys
+        self._bliska = h_rel >= (BLISKA_OD - 0.12 if getattr(self, "_bliska", False) else BLISKA_OD)
+        if self._bliska:
+            py = wys / 2
         self.punkt = (px, py)
         self.blad = ((px - szer / 2) / (szer / 2), (py - wys / 2) / (wys / 2), True)
         if msg:
@@ -2212,7 +2631,7 @@ def tryb_kamera(port=None, mock=False):
 
     arm = polacz(port, mock)
     st = Sterownik(arm)
-    kam = otworz_kamere()
+    kam = KameraWatek(otworz_kamere())
     kaucje, sled = Kaucje(), SledzenieButelek()
     historia = TrackingHistory()
     historia.load()
@@ -2226,14 +2645,23 @@ def tryb_kamera(port=None, mock=False):
     srv = serwer_http(arm)
     print(f"Pad: {'PODLACZONY' if st.pad_ok else 'brak (tylko klawiatura)'}")
     print(f"GOTOWY. Sygnal od RoArma: http://{moje_ip()}:{PORT_HTTP}/skanuj")
-    print("Klikni w okno kamery i steruj:\n" + POMOC)
     tytul = "Ramie SO-101"
-    cv2.namedWindow(tytul, cv2.WINDOW_NORMAL)  # okno mozna zmniejszac/powiekszac
-    cv2.resizeWindow(tytul, 960, 540)
-    pomoc = True
-    utworz_suwaki(sledz)
+    panel = f"http://{moje_ip()}:{PORT_HTTP}/"
+    print(f"Widok na prezentacje: {panel}pokaz")
+    if BEZ_OKNA:
+        print(f"Bez okna - panel w przegladarce: {panel}")
+        pomoc = False  # klawisze sa na stronie
+    else:
+        print("Klikni w okno kamery i steruj:\n" + POMOC)
+        cv2.namedWindow(tytul, cv2.WINDOW_NORMAL)  # okno mozna zmniejszac/powiekszac
+        cv2.resizeWindow(tytul, 960, 540)
+        pomoc = True
+        utworz_suwaki(sledz)
     komunikat, komunikat_do = "", 0.0
     byl_zajety = False
+    t_web = t_czysty = 0.0
+    nr_klatki, ostr = 0, 0.0
+    szer_ekranu = 960 if BEZ_OKNA else 1280  # bez okna obraz idzie tylko do przegladarki (i tak 960 px)
 
     def pokaz(tekst):
         nonlocal komunikat, komunikat_do
@@ -2242,29 +2670,35 @@ def tryb_kamera(port=None, mock=False):
 
     try:
         while True:
-            ok, klatka = kam.read()
+            ok, klatka, t_zdjecia = kam.read()  # najnowsza klatka + kiedy przyszla z kamery
             if not ok:
                 continue
             teraz = time.time()
+            if teraz > t_klatki:  # kl/s petli (wygladzone) - na obrazie i w /status
+                stan["kl_s"] = round(0.9 * stan.get("kl_s", 0.0) + 0.1 / (teraz - t_klatki), 1)
             dt, t_klatki = min(teraz - t_klatki, 0.2), teraz
             wys, szer = klatka.shape[:2]
-            ostr = ostrosc(klatka)
-            butelki = detektor.wykryj(klatka)
+            nr_klatki += 1
+            if nr_klatki % 5 == 1:  # ostrosc tylko do napisu na ekranie - nie trzeba co klatke
+                ostr = ostrosc(klatka)
+            butelki = detektor.wykryj(klatka, sledzi=bool(sled.cel), duza=sled.rozmiar >= YOLO_DUZA_OD)
             czytnik.pauza = inspekcja.stan == "WYNIK" and bool(inspekcja.wynik) and inspekcja.wynik["kod"] is not None
             if czytnik.potrzebna_klatka():
                 czytnik.podaj(klatka.copy(), sled.cel, sled.box)  # kody czytane w tle, na kopii klatki
             kody = czytnik.kody
             if sled.cel and sled.cel in czytnik.kod_celu:
                 sled.ean = czytnik.kod_celu[sled.cel]
-            # przetwarzanie w pelnej rozdzielczosci, a wyswietlanie na obrazie 1280 px szerokosci
-            sk = 1280 / szer
-            ekran = cv2.resize(klatka, (1280, int(round(wys * sk))), interpolation=cv2.INTER_AREA) if sk < 1 else klatka
+            # przetwarzanie w pelnej rozdzielczosci, a wyswietlanie na mniejszym obrazie
+            sk = szer_ekranu / szer
+            ekran = cv2.resize(klatka, (szer_ekranu, int(round(wys * sk))), interpolation=cv2.INTER_AREA) \
+                if sk < 1 else klatka.copy()
             sk = min(sk, 1.0)
             ew, eh = ekran.shape[1], ekran.shape[0]
             # kod w srodku butelki = to jej kod (kaucja)
-            for bt in butelki:
+            for bt in butelki:  # (tylko potwierdzone kody - pojedynczy odczyt z calego obrazu bywa bledny)
                 x0, y0, x1, y1 = bt["box"]
-                kod = next((k for k in kody if k["ean"] and x0 <= k["cx"] <= x1 and y0 <= k["cy"] <= y1), None)
+                kod = next((k for k in kody if k["ean"] in czytnik.pewne and x0 <= k["cx"] <= x1 and y0 <= k["cy"] <= y1),
+                           None)
                 bt["ean"] = kod["ean"] if kod else None
                 bt["kod_xy"] = (kod["cx"], kod["cy"]) if kod else None
             for k in kody:
@@ -2292,6 +2726,12 @@ def tryb_kamera(port=None, mock=False):
                                    cv2.MARKER_TILTED_CROSS, 30, 3)
                 opis = f"{bt['klasa']} {bt['pewnosc']:.0%}" + (" KAUCJA" if kaucja else "") + ("  <- CEL" if cel else "")
                 cv2.putText(ekran, opis, (x0 + 4, max(y0 + 22, 40)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, kolor, 2)
+            # widok /pokaz: obraz z samymi ramkami (bez paskow z liczbami) + lista wykryc
+            _web["wykrycia"] = [{"klasa": b["klasa"], "pewnosc": round(b["pewnosc"], 2)} for b in butelki
+                                if b["pewnosc"] >= (BUTELKA_PROG if b["klasa"] == "butelka" else PUSZKA_PROG)]
+            if _web["widzowie_czysty"] > 0 and teraz - t_czysty >= 1 / WEB_FPS:
+                t_czysty = teraz
+                web_klatka(ekran, czysty=True)
 
             # duzy napis: etap inspekcji i wynik (kaucja / bez / obroc butelke)
             if sledz:
@@ -2310,7 +2750,7 @@ def tryb_kamera(port=None, mock=False):
                 if sledz:
                     mial_cel = sled.cel is not None
                     klucz_przed = sled.ean or sled.cel
-                    msg = sled.krok(butelki, kaucje, szer, wys, st)
+                    msg = sled.krok(butelki, kaucje, szer, wys, st, t_klatki=t_zdjecia)
                     # historia: swiezy pomiar sledzonej butelki (klucz = EAN, a bez kodu - numer butelki)
                     if sled.cel and sled.xy and teraz - sled.widziany < 0.05:
                         historia.update(sled.ean or sled.cel, kaucje.nazwy.get(sled.ean or "", ""), teraz,
@@ -2338,14 +2778,27 @@ def tryb_kamera(port=None, mock=False):
                 if "back" in pressed:
                     break
 
-            k = cv2.waitKey(1) & 0xFF
-            nowy = czytaj_suwaki(sledz)
+            wejscie = []
+            nowy = sledz
+            if not BEZ_OKNA:
+                k = cv2.waitKey(1) & 0xFF
+                nowy = czytaj_suwaki(sledz)
+                if k != 255:
+                    wejscie.append("\r" if k in (10, 13) else ("\x1b" if k == 27 else chr(k).lower()))
+            while not _web_klawisze.empty():  # klawisze i wlacznik sledzenia z panelu w przegladarce
+                c = _web_klawisze.get()
+                if c.startswith("sledz"):
+                    nowy = c == "sledz1"
+                elif c not in ("q", "\x1b"):  # z przegladarki nie wylaczamy programu
+                    wejscie.append(c)
             if nowy != sledz:
                 sledz, sled.cel = nowy, None
+                if not BEZ_OKNA:  # wlacznik z przegladarki -> suwak w oknie (inaczej suwak przelaczy z powrotem)
+                    try:
+                        cv2.setTrackbarPos("sledzenie 0/1", OKNO_USTAWIEN, int(sledz))
+                    except cv2.error:
+                        pass
                 pokaz(f"sledzenie {'WLACZONE' if sledz else 'WYLACZONE'}")
-            wejscie = []
-            if k != 255:
-                wejscie.append("\r" if k in (10, 13) else ("\x1b" if k == 27 else chr(k).lower()))
             wejscie += [c for c in read_keys() if c == "\r"]  # Enter tez z terminala
             for c in wejscie:
                 if c in ("q", "\x1b"):
@@ -2358,10 +2811,11 @@ def tryb_kamera(port=None, mock=False):
                     zadanie(arm, do_domu, "dom") or pokaz("ramie zajete")
                 elif c == "t":
                     sledz, sled.cel = not sledz, None
-                    try:
-                        cv2.setTrackbarPos("sledzenie 0/1", OKNO_USTAWIEN, int(sledz))
-                    except cv2.error:
-                        pass
+                    if not BEZ_OKNA:
+                        try:
+                            cv2.setTrackbarPos("sledzenie 0/1", OKNO_USTAWIEN, int(sledz))
+                        except cv2.error:
+                            pass
                     pokaz(f"sledzenie {'WLACZONE' if sledz else 'WYLACZONE'}")
                 elif c == "\t":
                     pomoc = not pomoc
@@ -2389,6 +2843,8 @@ def tryb_kamera(port=None, mock=False):
                 pokaz(st.komunikat)
                 st.komunikat = ""
             gora = stan["stan"] + (f" | SLEDZE {sled.cel}" if sled.cel else (" | sledzenie wl." if sledz else ""))
+            gora += f" | {stan.get('kl_s', 0):.0f} kl/s"
+            gora += f" | YOLO laptop {_zdalny['kl_s']:.0f}/s" if _web.get("yolo") == "laptop" else ""
             gora += f" | ostrosc {ostr:.0f}" + (" (NIEOSTRO - krec obiektywem)" if ostr < 60 else "")
             if stan["wynik"] and not _zajety.is_set():
                 w = stan["wynik"]
@@ -2400,14 +2856,20 @@ def tryb_kamera(port=None, mock=False):
             cv2.putText(ekran, gora, (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
             cv2.rectangle(ekran, (0, h - 46), (w_, h), (0, 0, 0), -1)
             cv2.putText(ekran, st.opis()[:90], (6, h - 28), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 255, 200), 1)
-            cv2.putText(ekran, "TAB = pomoc z klawiszami | suwaki w oknie 'Ustawienia' | Q = koniec",
-                        (6, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
+            stopka = (f"panel: {panel}" if BEZ_OKNA
+                      else "TAB = pomoc z klawiszami | suwaki w oknie 'Ustawienia' | Q = koniec")
+            cv2.putText(ekran, stopka, (6, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1)
             if pomoc:
                 rysuj_panel(ekran)
             if komunikat and time.time() < komunikat_do:
                 # pod duzym napisem o kaucji (ten zajmuje gore obrazu), zeby sie nie nakladaly
                 cv2.putText(ekran, komunikat, (10, 118), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-            cv2.imshow(tytul, ekran)
+            _web["sledz"] = sledz
+            if not BEZ_OKNA:
+                cv2.imshow(tytul, ekran)
+            if _web["widzowie"] > 0 and teraz - t_web >= 1 / WEB_FPS:  # panel w przegladarce (tez obok okna)
+                t_web = teraz
+                web_klatka(ekran)
     except KeyboardInterrupt:
         pass
     except SO101Error as e:
@@ -2418,7 +2880,8 @@ def tryb_kamera(port=None, mock=False):
         print("\nKoniec - ramie trzyma pozycje.")
         srv.shutdown()
         kam.release()
-        cv2.destroyAllWindows()
+        if not BEZ_OKNA:
+            cv2.destroyAllWindows()
         if _zajety.is_set():
             _skan_koniec.wait(timeout=30)
         try:
