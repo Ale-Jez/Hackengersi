@@ -23,7 +23,7 @@ import tarfile
 PI = os.environ.get("PI", "hackengersi@malina.local")
 PYTHON_PI = "~/Hackengersi/.venv/bin/python"  # venv z opencv, onnxruntime, zxing-cpp, feetech-servo-sdk
 KOD = ["ramie.py", "camera.py", "pizza.py", "teach.py", "roarm.py", "butelki.py", "pokaz.html",
-       "../Raspberry/roarm_wifi.py"]  # RoArm przez WiFi (kod kolegi)
+       "../Raspberry/roarm_wifi.py", "../Raspberry/roarm_console.py"]  # RoArm przez WiFi (kod kolegi)
 DANE = ["poses_so101.json", "kaucja.json", "tracking_history.json", "roarm_kaucja.json"]  # tylko gdy na Pi ich brak
 MODEL = os.path.join("modele", "yolo11n.onnx")
 
