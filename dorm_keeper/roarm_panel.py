@@ -18,6 +18,8 @@ _katalog = os.path.dirname(os.path.abspath(__file__))
 PREDKOSCI = {"wolno": (20.0, 0.12), "normalnie": (40.0, 0.2), "szybko": (60.0, 0.25)}  # (mm/s, spd firmware <=0.25)
 WYPRZEDZENIE = 0.6               # s: cel jest tyle ruchu przed ramieniem -> jedzie rowno, zamiast krok-stop-krok
 PODNIES_MM = 100.0               # P: chwyc i podnies o tyle
+SERWO_GORACE = (60, 65)          # st. C: od 65 jazda zablokowana (serwo odpoczywa), od 60 w dol znowu wolno
+SERWA_ROARM = ["podstawa", "bark 1", "bark 2", "lokiec", "nadgarstek", "obrot", "chwytak"]  # kolejnosc "temp" z /ws
 Z_ZAKRES = (-150.0, 350.0)       # mm
 OBCIAZENIE_STOP = 350            # |obciazenie| barku/lokcia (jednostki firmware): ponad = STOP i trzymaj
 PODTRZYMANIE = 0.35              # s: bez sygnalu z przegladarki ramie staje (puszczony przycisk, zerwane WiFi)
@@ -50,7 +52,36 @@ class PanelRoArma:
         self.polecenia = []       # jednorazowe: chwytak, start, stop
         self.proces, self.proces_nazwa, self.log = None, "", []
         self._lock = threading.Lock()
+        self.goracy = False
         threading.Thread(target=self._petla, daemon=True).start()
+        threading.Thread(target=self._websocket, daemon=True).start()
+
+    def _websocket(self):
+        """Temperatury 7 serw (T:1051 "temp", ~1.5/s) i alarmy (T:-15: przeciazenie, przegrzanie, napiecie)
+        z WebSocketu RoArma - te same dane, z ktorych ostrzega jego wlasna strona."""
+        try:
+            import websocket
+        except ImportError:
+            self.stan["serwa"] = "brak biblioteki websocket-client (pip install websocket-client)"
+            return
+        while True:
+            try:
+                ws = websocket.create_connection(f"ws://{self.ip}/ws", timeout=5)
+                while True:
+                    d = json.loads(ws.recv())
+                    if d.get("T") == 1051 and isinstance(d.get("temp"), list):
+                        temp = d["temp"]
+                        self.stan["temp_serw"] = dict(zip(SERWA_ROARM, temp))
+                        self.stan["temp_t"] = time.time()
+                        najw = max(temp)
+                        self.goracy = najw >= SERWO_GORACE[1] or (self.goracy and najw > SERWO_GORACE[0])
+                    elif d.get("T") == -15:
+                        self.stan["alarmy"] = {"przeciazenie": bool(d.get("Stalltor")),
+                                               "przegrzanie": bool(d.get("Stalltep")),
+                                               "napiecie": {1: "za wysokie", 2: "za niskie"}.get(d.get("Stallvol"))}
+            except Exception:  # RoArm wylaczony / restart - probuj dalej
+                self.stan.pop("temp_serw", None)
+                time.sleep(2)
 
     # ------------------------------------------------------------------ RoArm
     def _js(self, cmd, timeout=1.5):
@@ -131,7 +162,8 @@ class PanelRoArma:
             if self.proces and self.proces.poll() is None:
                 continue  # kalibracja / zbieranie steruje RoArmem - panel nie przeszkadza
             try:
-                jedzie = bool(self.kier) and teraz - self.kier_t < PODTRZYMANIE and not self.bez_momentu
+                jedzie = bool(self.kier) and teraz - self.kier_t < PODTRZYMANIE and not self.bez_momentu \
+                    and not self.goracy
                 if self.cel is None or teraz - t_odczyt > (0.2 if jedzie else 0.6):
                     d = self._gdzie()
                     t_odczyt = time.time()
@@ -180,7 +212,12 @@ class PanelRoArma:
                                                    "t": self.t_cmd, "r": self.r_cmd})
                         self._jedz(self.cel, spd=PREDKOSCI["wolno"][1])
                         self.stan["komunikat"] = f"chwycil i podnosi o {PODNIES_MM:.0f} mm"
-                if self.kier and self.bez_momentu:
+                if self.kier and self.goracy:
+                    self.kier = None
+                    najw = max((self.stan.get("temp_serw") or {"?": 0}).items(), key=lambda kv: kv[1])
+                    self.stan["komunikat"] = (f"SERWO GORACE ({najw[0]} {najw[1]} C) - jazda zablokowana do "
+                                              f"{SERWO_GORACE[0]} C. Pozycja startowa odciaza bark")
+                elif self.kier and self.bez_momentu:
                     self.kier = None
                     self.stan["komunikat"] = "serwa bez momentu - najpierw kliknij Pozycja startowa"
                 elif self.kier and teraz - self.kier_t >= PODTRZYMANIE:
@@ -289,6 +326,11 @@ button:active,button.on{background:var(--akcent);color:#06121e}button small{disp
 .zielony{background:#1b5e3a}.czerwony{background:#6b2124}
 ol{margin:6px 0 0;padding-left:20px;color:var(--przyg);line-height:1.5}ol b{color:var(--tekst)}
 pre{background:#05080b;border-radius:8px;padding:8px;height:170px;overflow:auto;font-size:12px;margin:8px 0 0;white-space:pre-wrap}
+.stan .wiersz{display:grid;grid-template-columns:150px 1fr 74px;gap:8px;align-items:center;font-size:13px}
+.stan .wiersz .pasek{margin:6px 0}.stan b{text-align:right;font-variant-numeric:tabular-nums}
+#uwagi div{margin-top:6px;padding:7px 10px;border-radius:8px;background:#4d1f22;color:#ffb3b3;font-weight:700;font-size:13px}
+#uwagi div.zolte{background:#4d3a12;color:#ffd98a}
+details{margin-top:8px;font-size:13px;color:var(--przyg)}#serwa{display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;margin-top:6px;font-variant-numeric:tabular-nums}
 </style></head><body><main>
 <div><div class="karta"><h1>RoArm - sterowanie</h1><span style="color:var(--przyg)">obraz z kamery SO-101 (to, co widzi program)</span>
 <img src="/podglad?czysty=1" alt="kamera SO-101"></div>
@@ -302,7 +344,15 @@ pre{background:#05080b;border-radius:8px;padding:8px;height:170px;overflow:auto;
 <pre id="log">(tu pojawi sie przebieg kalibracji / zbierania)</pre></div></div>
 <div class="karta"><div id="kom">lacze sie...</div>
 <div class="poz"><div><span>wysuniecie</span><b id="px">-</b></div><div><span>obrot podstawy</span><b id="py">-</b></div><div><span>wysokosc</span><b id="pz">-</b></div></div>
-<h2>Obciazenie serw</h2><span>bark</span><div class="pasek"><i id="obark"></i></div><span>lokiec</span><div class="pasek"><i id="olok"></i></div>
+<h2>Stan systemu</h2><div class="stan">
+<div class="wiersz"><span>Raspberry CPU</span><div class="pasek"><i id="s-cpu"></i></div><b id="t-cpu">-</b></div>
+<div class="wiersz"><span>Raspberry RAM</span><div class="pasek"><i id="s-ram"></i></div><b id="t-ram">-</b></div>
+<div class="wiersz"><span>Raspberry temp.</span><div class="pasek"><i id="s-temp"></i></div><b id="t-temp">-</b></div>
+<div class="wiersz"><span>SO-101 najcieplejsze serwo</span><div class="pasek"><i id="s-so"></i></div><b id="t-so">-</b></div>
+<div class="wiersz"><span>RoArm najcieplejsze serwo</span><div class="pasek"><i id="s-ra"></i></div><b id="t-ra">-</b></div>
+<div class="wiersz"><span>RoArm obciazenie barku</span><div class="pasek"><i id="obark"></i></div><b id="t-bark">-</b></div>
+<div class="wiersz"><span>RoArm obciazenie lokcia</span><div class="pasek"><i id="olok"></i></div><b id="t-lok">-</b></div>
+<div id="uwagi"></div><details><summary>wszystkie serwa</summary><div id="serwa"></div></details></div>
 <h2>Skad patrzysz na RoArma?</h2><div class="siatka" style="grid-template-columns:1fr 1fr">
 <button data-widok="przod">Stoje PRZED nim<small>twarza do robota</small></button><button data-widok="tyl">Stoje ZA nim<small>patrze tam, gdzie on</small></button></div>
 <h2>Ruch - jak SO-101 (przytrzymaj, puszczasz = stoi; chwytak trzyma swoj kat jak hak dzwigu)</h2><div class="siatka">
@@ -348,8 +398,31 @@ onkeydown=e=>{const key=e.key.toLowerCase(),k=klawisz(key);
  else if(PRED[key])predkosc(PRED[key])};
 onkeyup=e=>{if(klawisz(e.key.toLowerCase())===trzymany)stoj()};onblur=stoj;
 function pasek(el,v){const p=Math.min(100,Math.abs(v||0)/350*100);el.style.width=p+'%';el.style.background=p>80?'var(--zle)':p>55?'var(--uwaga)':'var(--ok)'}
+// miernik: pasek do "max", kolor od progow zolty/czerwony, tekst obok
+function miernik(id,v,max,zolty,czerwony,tekst){const el=$('s-'+id),t=$('t-'+id);
+ if(v==null||isNaN(v)){el.style.width='0';t.textContent='-';return}
+ el.style.width=Math.min(100,Math.max(0,v)/max*100)+'%';el.style.background=v>=czerwony?'var(--zle)':v>=zolty?'var(--uwaga)':'var(--ok)';t.textContent=tekst}
+const najcieplejsze=o=>o?Object.entries(o).reduce((a,b)=>b[1]>a[1]?b:a,['',-1]):null;
+let roarm={};
+async function odswiezSystem(){const s=await get('/system'),uw=[];
+ miernik('cpu',s.cpu,100,70,90,s.cpu!=null?Math.round(s.cpu)+' %':'-');
+ miernik('ram',s.ram,100,75,90,s.ram!=null?Math.round(s.ram)+' %':'-');
+ miernik('temp',s.temp,90,75,82,s.temp!=null?s.temp.toFixed(0)+' C'+(s.zegar_mhz?' '+(s.zegar_mhz/1000).toFixed(1)+'GHz':''):'-');
+ const so=najcieplejsze(s.so101&&s.so101.temp);miernik('so',so&&so[1],75,55,65,so&&so[1]>=0?so[1]+' C':'-');
+ const ra=najcieplejsze(roarm.temp_serw);miernik('ra',ra&&ra[1],75,55,65,ra&&ra[1]>=0?ra[1]+' C':'-');
+ if(s.zbija_zegar)uw.push(['Raspberry sie przegrzewa - zegar zbity (wentylator!)','']);
+ if(s.niskie_napiecie)uw.push(['Raspberry: za niskie napiecie zasilacza','']);
+ if(so&&so[1]>=55)uw.push(['SO-101: '+so[0]+' '+so[1]+' C',so[1]>=65?'':'zolte']);
+ if(ra&&ra[1]>=55)uw.push(['RoArm: '+ra[0]+' '+ra[1]+' C'+(ra[1]>=65?' - jazda zablokowana, niech odpocznie':' - odciaz (Pozycja startowa)'),ra[1]>=65?'':'zolte']);
+ const al=roarm.alarmy||{};if(al.przeciazenie)uw.push(['RoArm: PRZECIAZENIE serwa (zablokowany ruch?)','']);
+ if(al.przegrzanie)uw.push(['RoArm: PRZEGRZANIE serwa - wylacz i odczekaj','']);if(al.napiecie)uw.push(['RoArm: napiecie '+al.napiecie,'']);
+ $('uwagi').innerHTML=uw.map(u=>`<div class="${u[1]}">${u[0]}</div>`).join('');
+ const wsz=[];if(s.so101&&s.so101.temp)for(const[k,v]of Object.entries(s.so101.temp))wsz.push(`<span>SO-101 ${k}: ${v} C${s.so101.napiecie&&s.so101.napiecie[k]?' / '+s.so101.napiecie[k].toFixed(1)+' V':''}</span>`);
+ if(roarm.temp_serw)for(const[k,v]of Object.entries(roarm.temp_serw))wsz.push(`<span>RoArm ${k}: ${v} C</span>`);
+ $('serwa').innerHTML=wsz.join('')||'brak danych';setTimeout(odswiezSystem,1000)}odswiezSystem();
 async function odswiez(){const d=await get('/roarm/stan');if(d.x!==undefined){$('px').textContent=Math.round(Math.hypot(d.x,d.y))+' mm';$('py').textContent=Math.round(Math.atan2(d.y,d.x)*180/Math.PI)+' st.';$('pz').textContent=Math.round(d.z)+' mm'}
- pasek($('obark'),d.bark);pasek($('olok'),d.lokiec);
+ roarm=d;pasek($('obark'),d.bark);pasek($('olok'),d.lokiec);
+ $('t-bark').textContent=d.bark!=null?Math.abs(d.bark):'-';$('t-lok').textContent=d.lokiec!=null?Math.abs(d.lokiec):'-';
  $('kom').textContent=d.proces?('trwa: '+d.proces+' (panel wstrzymany)'):(d.komunikat||'');$('kom').className=(!d.polaczony||/PRZECIAZ/.test(d.komunikat||''))?'zle':'';
  if(d.log&&d.log.length){const l=$('log');l.textContent=d.log.join('\\n');l.scrollTop=l.scrollHeight}
  $('zb').disabled=!d.kalibracja;$('zb').title=d.kalibracja?'':'najpierw kalibracja';setTimeout(odswiez,500)}odswiez();

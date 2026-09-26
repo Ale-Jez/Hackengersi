@@ -1114,6 +1114,49 @@ def web_klatka(ekran, czysty=False):
             _web_nowa.notify_all()
 
 
+_sys = {"cpu": None, "throttle": None, "throttle_t": 0.0}
+
+
+def _stan_systemu():
+    """Komputer z ramie.py (Raspberry): CPU %, RAM, temperatura, zegar, zbijanie zegara + serwa SO-101."""
+    import subprocess
+
+    out = {"so101": _web.get("serwa_so101")}
+    try:
+        with open("/proc/stat") as f:
+            v = [int(x) for x in f.readline().split()[1:]]
+        idle, total = v[3] + v[4], sum(v)
+        prev, _sys["cpu"] = _sys["cpu"], (idle, total)
+        if prev and total > prev[1]:
+            out["cpu"] = round(100 * (1 - (idle - prev[0]) / (total - prev[1])), 1)
+        mem = {}
+        with open("/proc/meminfo") as f:
+            for linia in f:
+                k, w = linia.split(":", 1)
+                mem[k] = int(w.split()[0])
+        out["ram"] = round(100 * (1 - mem["MemAvailable"] / mem["MemTotal"]), 1)
+        out["ram_mb"], out["ram_calk_mb"] = round((mem["MemTotal"] - mem["MemAvailable"]) / 1024), round(mem["MemTotal"] / 1024)
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            out["temp"] = round(int(f.read()) / 1000, 1)
+        with open("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") as f:
+            out["zegar_mhz"] = round(int(f.read()) / 1000)
+        if time.time() - _sys["throttle_t"] > 5:  # vcgencmd tylko co 5 s
+            _sys["throttle_t"] = time.time()
+            r = subprocess.run(["vcgencmd", "get_throttled"], capture_output=True, text=True, timeout=2)
+            _sys["throttle"] = int(r.stdout.strip().split("=")[1], 16)
+    except (OSError, ValueError, IndexError, KeyError, subprocess.SubprocessError):
+        try:  # nie Raspberry (np. laptop z Windows)
+            import psutil
+
+            out.update(cpu=psutil.cpu_percent(None), ram=psutil.virtual_memory().percent)
+        except ImportError:
+            pass
+    if _sys["throttle"] is not None:
+        out["zbija_zegar"] = bool(_sys["throttle"] & 0x6)          # teraz: zegar ograniczony / dlawiony
+        out["niskie_napiecie"] = bool(_sys["throttle"] & 0x1)      # zasilacz Pi za slaby
+    return out
+
+
 def _dane_butelek():
     """Dla RoArma (butelki.py): butelki w kadrze (piksele pelnej klatki) + czy kamera stoi w pozycji patrzenia.
 
@@ -1218,6 +1261,8 @@ def serwer_http(arm):
                 self.wfile.write(tresc)
             elif adres.path == "/dane":
                 self._json(_dane_pokazu())
+            elif adres.path == "/system":  # CPU, RAM, temperatura Pi + temperatury serw SO-101
+                self._json(_stan_systemu())
             elif adres.path == "/butelki":  # RoArm: gdzie stoja butelki (piksele) + czy kamera w pozycji patrzenia
                 self._json(_dane_butelek())
             elif adres.path == "/sledzenie" and q.get("wl") in ("0", "1"):  # RoArm wlacza/wylacza sledzenie
@@ -2734,6 +2779,7 @@ def tryb_kamera(port=None, mock=False):
     byl_zajety = False
     t_web = t_czysty = 0.0
     nr_klatki, ostr = 0, 0.0
+    t_serwa, nr_serwa = 0.0, -1  # temperatury serw SO-101 czytane po kolei
     szer_ekranu = 960 if BEZ_OKNA else 1280  # bez okna obraz idzie tylko do przegladarki (i tak 960 px)
 
     def pokaz(tekst):
@@ -2856,6 +2902,14 @@ def tryb_kamera(port=None, mock=False):
                 _web["stawy"] = dict(st.here)
                 _web["ruch_t"] = teraz if not poprz or any(abs(st.here[j] - poprz[j]) > 0.4 for j in MOVE_JOINTS) \
                     else _web.get("ruch_t", 0.0)
+                # temperatura i napiecie serw SO-101: jedno serwo co 0.5 s (rejestry 62 napiecie, 63 temperatura)
+                if not st.mock and teraz - t_serwa > 0.5:
+                    t_serwa, nr_serwa = teraz, (nr_serwa + 1) % len(arm.JOINTS)
+                    j = arm.JOINTS[nr_serwa]
+                    val, res, _ = arm.ph.read2ByteTxRx(arm.port, arm.ids[j], 62)
+                    if res == arm._ok:
+                        s = _web.setdefault("serwa_so101", {"temp": {}, "napiecie": {}})
+                        s["temp"][j], s["napiecie"][j] = val >> 8, (val & 0xFF) / 10
                 if "y" in pressed or "start" in pressed:
                     zadanie(arm, ogladaj_puszke, "skan")
                 if "back" in pressed:
