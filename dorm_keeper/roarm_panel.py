@@ -139,6 +139,17 @@ class PanelRoArma:
         self.kier = None
         self.stan["komunikat"] = komunikat
 
+    def _moment_tutaj(self, d):
+        """Serwa bez momentu (ramie przestawione recznie): cel kazdego serwa = jego zmierzony kat, potem moment wl.
+        Ramie zostaje, gdzie jest - bez jazdy do Pozycji startowej (tam moze juz cos stac)."""
+        self._js({"T": 102, "base": d["b"], "shoulder": d["s"], "elbow": d["e"], "wrist": d["t"], "roll": d["r"],
+                  "hand": d["g"], "spd": 50, "acc": 10})
+        self._js({"T": 210, "cmd": 1})  # tylko EnableTorque (cmd 0 najpierw jedzie do stalej pozy!)
+        self.cel = {"x": d["x"], "y": d["y"], "z": d["z"], "t": d["tit"], "r": d.get("r", 0.0)}
+        self.t_cmd, self.r_cmd, self.g = d["tit"], d.get("r", 0.0), d["g"]
+        self.bez_momentu = False
+        self.stan["komunikat"] = "silniki wlaczone tutaj - przytrzymaj przycisk, zeby jechac"
+
     def _chwytak(self, zamknij):
         self.g = self.zam if zamknij else self.otw
         try:
@@ -183,7 +194,7 @@ class PanelRoArma:
                         self.t_cmd, self.r_cmd = d["tit"], d.get("r", 0.0)
                         if 1.0 <= (d.get("g") or 0) <= 3.5:
                             self.g = d["g"]  # chwytak zostaje, jak jest (inaczej pierwszy ruch by go otworzyl)
-                        self.stan["komunikat"] = ("serwa bez momentu - kliknij Pozycja startowa" if self.bez_momentu
+                        self.stan["komunikat"] = ("serwa bez momentu - pierwszy przycisk ruchu wlaczy je w miejscu" if self.bez_momentu
                                                   else "gotowy - przytrzymaj przycisk, zeby jechac")
                     elif max(abs(d.get("tS", 0)), abs(d.get("tE", 0))) > OBCIAZENIE_STOP:
                         self._trzymaj(d, "PRZECIAZENIE - ramie trzyma pozycje. Podnies je wyzej / blizej podstawy")
@@ -224,8 +235,7 @@ class PanelRoArma:
                     self.stan["komunikat"] = (f"SERWO GORACE ({najw[0]} {najw[1]} C) - jazda zablokowana do "
                                               f"{SERWO_GORACE[0]} C. Pozycja startowa odciaza bark")
                 elif self.kier and self.bez_momentu:
-                    self.kier = None
-                    self.stan["komunikat"] = "serwa bez momentu - najpierw kliknij Pozycja startowa"
+                    self._moment_tutaj(self._gdzie())  # nastepny obieg juz jedzie
                 elif self.kier and teraz - self.kier_t >= PODTRZYMANIE:
                     self.kier = None  # puszczony przycisk: bez nowych celow ramie dojezdza do ostatniego i stoi
                     self.stan["komunikat"] = "stoi"

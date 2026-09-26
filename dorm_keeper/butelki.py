@@ -70,7 +70,10 @@ DOMYSLNE = {
     # --- kalibruj brev (bez butelki): wszystko do dostrojenia na prawdziwym stole ---
     "brev_url": None, "brev_model": None,  # None = z Raspberry/config.json kolegi (klucz: $BREV_KEY albo ~/.bashrc)
     "kal_brev_start": [250, 0],   # x, y (mm): srodek siatki - w zasiegu RoArma i w kadrze kamery SO-101
-    "kal_brev_nad_stolem_mm": 5,  # czubek chwytaka tyle nad stolem, gdy kamera go oglada (plaszczyzna = podstawy butelek)
+    "kal_brev_nad_stolem_mm": 5,
+    "kal_g": 3.0,                 # chwytak przy kalibracji: prawie zamkniety - 3.14 sciska szczeki i grzeje serwo (57 C)
+    "kal_t": 1.57, "kal_r": 0.0,  # nachylenie/obrot chwytaka przy kalibracji (1.57 = w dol); "kalibruj tag" bierze
+                                  # je, jak i srodek siatki, z obecnej pozycji RoArma (ustawionej tak, by tag byl widac)  # czubek chwytaka tyle nad stolem, gdy kamera go oglada (plaszczyzna = podstawy butelek)
     "kal_brev_zgodnosc_px": 30,   # px pelnej klatki: dwie odpowiedzi VLM (dwie klatki) musza sie zgadzac, inaczej pomijam
     "kal_brev_ransac_mm": 20,     # punkt dalej niz tyle od dopasowanej homografii = zla odpowiedz VLM, odrzucony
     # --- kalibruj tag: AprilTag 36h11 przyklejony PIONOWO na szczece chwytaka, przodem do kamery SO-101 ---
@@ -477,8 +480,8 @@ def do_stolu(arm, cfg, x, y, log=print):
 
     Dotkniecie = obciazenie barku/lokcia odbiega od tego w powietrzu albo ramie zostaje nad celem (stol trzyma).
     Blad z w powietrzu odejmujemy: bark Feetech i tak wisi ~0,05 rad ponizej celu."""
-    zam, spd, pauza = cfg["chwyt_zamkniety"], cfg["stol_spd"], cfg["stol_pauza_s"]
-    p = {"x": x, "y": y, "z": cfg["stol_start_z"], "t": 1.57, "r": 0.0}
+    zam, spd, pauza = cfg["kal_g"], cfg["stol_spd"], cfg["stol_pauza_s"]
+    p = {"x": x, "y": y, "z": cfg["stol_start_z"], "t": cfg["kal_t"], "r": cfg["kal_r"]}
     jedz(arm, p, zam, spd=spd)
     time.sleep(pauza)
     probki = [pozycja(arm) for _ in range(3)]
@@ -487,7 +490,7 @@ def do_stolu(arm, cfg, x, y, log=print):
     z = p["z"]
     while z - cfg["stol_krok_mm"] >= cfg["stol_dno_z"]:
         z -= cfg["stol_krok_mm"]
-        arm.send({"T": 104, "x": round(x, 1), "y": round(y, 1), "z": round(z, 1), "t": 1.57, "r": 0, "g": zam,
+        arm.send({"T": 104, "x": round(x, 1), "y": round(y, 1), "z": round(z, 1), "t": p["t"], "r": p["r"], "g": zam,
                   "spd": spd})
         time.sleep(pauza)
         w = pozycja(arm)
@@ -495,8 +498,8 @@ def do_stolu(arm, cfg, x, y, log=print):
         log(f"  stol? z={w['z']:.0f} (cel {z:.0f}) bark {d_s:+.0f} lokiec {d_e:+.0f} nad celem {nad:+.0f} mm"
             f" | {opis_temp(arm)}")
         if max(abs(w["tS"]), abs(w["tE"])) > cfg["stol_max_obciazenie"]:
-            arm.send({"T": 104, "x": round(w["x"], 1), "y": round(w["y"], 1), "z": round(w["z"], 1), "t": 1.57,
-                      "r": 0, "g": zam, "spd": spd})  # STOP = zmierzona poza (nigdy T:0)
+            arm.send({"T": 104, "x": round(w["x"], 1), "y": round(w["y"], 1), "z": round(w["z"], 1), "t": p["t"],
+                      "r": p["r"], "g": zam, "spd": spd})  # STOP = zmierzona poza (nigdy T:0)
             raise RuntimeError(f"za duze obciazenie przy stole (bark {w['tS']}, lokiec {w['tE']}) - STOP")
         if max(abs(d_s), abs(d_e)) > cfg["stol_prog_obciazenia"] or nad > cfg["stol_prog_z_mm"]:
             jedz(arm, dict(p, z=w["z"] + 10), zam, spd=spd)  # odsun sie od stolu
@@ -510,7 +513,7 @@ def kalibruj_brev(arm, so, cfg, pytaj=zapytaj_brev, log=print, zrodlo="brev"):
     import cv2
     import numpy as np
 
-    zam, spd = cfg["chwyt_zamkniety"], cfg["stol_spd"]
+    zam, spd = cfg["kal_g"], cfg["stol_spd"]
     log("SAMOKALIBRACJA (Brev). SO-101 patrzy na stol...")
     so.sledzenie(False)
     so.patrz()
@@ -528,7 +531,7 @@ def kalibruj_brev(arm, so, cfg, pytaj=zapytaj_brev, log=print, zrodlo="brev"):
         x, y = x0 + dx, y0 + dy
         if not w_zasiegu(cfg, x, y):
             continue
-        gora = {"x": x, "y": y, "z": z_stol + cfg["podejscie_mm"], "t": 1.57, "r": 0.0}
+        gora = {"x": x, "y": y, "z": z_stol + cfg["podejscie_mm"], "t": cfg["kal_t"], "r": cfg["kal_r"]}
         jedz(arm, gora, zam, spd=spd)
         nisko = z_stol + cfg["kal_brev_nad_stolem_mm"]
         jedz(arm, dict(gora, z=nisko), zam, spd=spd)
@@ -899,6 +902,9 @@ def main():
     elif cmd == ["idz"] and sys.argv[2:3] and punkt(cfg, sys.argv[2]):
         jedz(arm, punkt(cfg, sys.argv[2]), cfg["chwyt_otwarty"], spd=cfg["spd"])
     elif cmd == ["kalibruj"] and sys.argv[2:3] == ["tag"]:  # jak brev, ale czubek z AprilTaga na chwytaku
+        w = arm.where()  # RoArm ustawiony recznie tak, ze kamera widzi tag: tu srodek siatki, to nachylenie i obrot
+        cfg.update(kal_brev_start=[w["x"], w["y"]], kal_t=w["tit"], kal_r=w.get("r", 0.0), stol_start_z=w["z"])
+        print(f"srodek x={w['x']:.0f} y={w['y']:.0f} mm, nachylenie {w['tit']:.2f} rad")
         kalibruj_brev(arm, so, cfg, pytaj=znajdz_tag, zrodlo="tag")
     elif cmd == ["kalibruj"] and sys.argv[2:3] == ["brev"]:  # bez butelki i bez czlowieka: VLM na Brev
         kalibruj_brev(arm, so, cfg)
