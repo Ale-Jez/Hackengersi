@@ -684,8 +684,13 @@ def go_rest(arm, cfg, timeout=20.0):
     raise TimeoutError(f"RoArm did not reach its rest pose (it is at {arm.where()})")
 
 
-def go_pose(arm, cfg, name, timeout=25.0):
-    """To saved pose `name` by joint angles (T:102): every joint straight to its angle; waits until there."""
+class Stopped(Exception):
+    """Stop pressed during play (not a RuntimeError: play's retry-on-error must not catch it)."""
+
+
+def go_pose(arm, cfg, name, timeout=25.0, stop=None):
+    """To saved pose `name` by joint angles (T:102): every joint straight to its angle; waits until there.
+    stop = threading.Event: when set, the arm holds where it is and Stopped is raised."""
     pose = cfg["poses"][name]
     arm.send({"T": 102, "base": pose["b"], "shoulder": pose["s"], "elbow": pose["e"], "wrist": pose["t"],
               "roll": pose["r"], "hand": pose["g"], "spd": int(cfg["speed"] * 1000), "acc": 10})
@@ -698,6 +703,9 @@ def go_pose(arm, cfg, name, timeout=25.0):
             w = arm.where()
         except RuntimeError:
             continue
+        if stop is not None and stop.is_set():
+            hold_here(arm, w)
+            raise Stopped(f"stopped on the way to '{name}'")
         if max(abs(w[k] - pose[k]) for k in "bset") < 0.08:
             return
     raise TimeoutError(f"RoArm did not reach pose '{name}' (it is at {arm.where()})")
@@ -706,7 +714,7 @@ def go_pose(arm, cfg, name, timeout=25.0):
 PROGRESS_FILE = os.path.join(_dir, "pick_progress.json")  # which step of the sequence is next (survives a crash)
 
 
-def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool_wait_s=600.0):
+def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool_wait_s=600.0, stop=None):
     """Taught pick: the saved poses one after another (cfg "sequence", else the order they were saved in, starting
     and ending at "rest" - the arm finishes where it started).
 
@@ -745,11 +753,13 @@ def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool
     while step < len(sequence):
         name = sequence[step]
         save(step)  # a crash from here on resumes at this step
+        if stop is not None and stop.is_set():
+            raise Stopped(f"stopped before step {step + 1} ({name})")
         failures = 0
         while True:
             try:
                 log(f"step {step + 1}/{len(sequence)}: {name}")
-                go_pose(arm, cfg, name)
+                go_pose(arm, cfg, name, stop=stop)
                 break
             except TimeoutError as e:
                 failures += 1
@@ -765,6 +775,8 @@ def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool
                 deadline = time.monotonic() + cool_wait_s
                 while True:
                     time.sleep(10)
+                    if stop is not None and stop.is_set():
+                        raise Stopped(f"stopped while cooling down before {name}")
                     try:
                         arm.check_temp(max_age=0)
                         break
@@ -898,7 +910,7 @@ def test():
         reached, fail = [], {"grip": 3}
         orig_go_pose = globals()["go_pose"]
 
-        def fake_go_pose(a, c, name, timeout=25.0):
+        def fake_go_pose(a, c, name, timeout=25.0, stop=None):
             if fail.get(name):
                 fail[name] -= 1
                 raise TimeoutError(name)

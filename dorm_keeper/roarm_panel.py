@@ -59,6 +59,8 @@ class RoArmPanel:
         self.commands = []        # one-shot: gripper, stop
         self._lock = threading.Lock()
         self.hot = False
+        self.playing = {"running": False, "log": []}  # the taught pick sequence (roarm_pick.play) in a thread
+        self._stop = threading.Event()
         threading.Thread(target=self._loop, daemon=True).start()
         threading.Thread(target=self._websocket, daemon=True).start()
 
@@ -200,6 +202,8 @@ class RoArmPanel:
         while True:
             time.sleep(0.05)
             now = time.time()
+            if self.playing["running"]:
+                continue  # the pick sequence drives the RoArm - the panel does not send anything meanwhile
             try:
                 moving = bool(self.dir) and now - self.dir_t < KEEPALIVE and not self.no_torque and not self.hot
                 if self.target is None or now - t_read > (0.2 if moving else 0.6):
@@ -305,8 +309,39 @@ class RoArmPanel:
         (cfg.get("poses") or {}).pop(name, None)
         roarm_pick.save_config(cfg)
 
+    # ------------------------------------------------------------------ taught pick sequence
+    def start_play(self, restart):
+        """roarm_pick.play in a thread; its log goes to the page. False when a pick is already running."""
+        if self.playing["running"]:
+            return False
+        import roarm_pick
+
+        self.dir = None
+        self._stop.clear()
+        self.playing = {"running": True, "log": ["--- pick " + ("from the start" if restart else "(continue)") + " ---"]}
+
+        def log(text):
+            self.playing["log"] = (self.playing["log"] + [text])[-60:]
+            self.state["message"] = text.strip()
+
+        def run():
+            try:
+                cfg = roarm_pick.load_config()
+                roarm_pick.play(roarm_pick.RoArm(cfg["roarm_ip"]), cfg, restart=restart, log=log, stop=self._stop)
+            except roarm_pick.Stopped as e:
+                log(f"STOPPED: {e} - Play pick continues from here")
+            except Exception as e:  # any failure: shown on the page, progress kept for the next Play pick
+                log(f"ERROR: {e} - Play pick continues from the failed step")
+            finally:
+                self.playing["running"] = False
+                self.target = None  # the panel re-reads the position before its next move
+
+        threading.Thread(target=run, daemon=True).start()
+        return True
+
     def data(self):
-        return dict(self.state, speed=self.speed, poses=_config().get("poses") or {})
+        return dict(self.state, speed=self.speed, poses=_config().get("poses") or {}, playing=self.playing,
+                    sequence=_config().get("sequence"))
 
 
 _panel = None
@@ -340,6 +375,11 @@ def handle(h, path, q):
         return h._json({"ok": True})
     if path == "/roarm/delete_pose" and POSE_NAME.match(q.get("name", "")):
         p.delete_pose(q["name"])
+        return h._json({"ok": True})
+    if path == "/roarm/play" and q.get("from") in ("continue", "start"):
+        return h._json({"ok": p.start_play(q["from"] == "start")})
+    if path == "/roarm/command" and q.get("c") == "stop" and p.playing["running"]:
+        p._stop.set()  # the pick sequence holds the arm where it is and stops
         return h._json({"ok": True})
     if path == "/roarm/command" and q.get("c") in COMMANDS:
         with p._lock:
@@ -401,6 +441,11 @@ details{margin-top:8px;font-size:13px;color:var(--dim)}#servos{display:grid;grid
 <button data-k="r+">roll gripper</button><button data-k="r-">roll gripper</button><span></span></div>
 <h2>Gripper</h2><div class="grid">
 <button data-c="toggle">GRAB / RELEASE</button><button data-c="lift" class="green">GRAB AND LIFT<small>10 cm up</small></button><button data-c="open">open</button></div>
+<h2>Pick sequence</h2><div class="grid">
+<button id="play" class="green">Play pick<small>continues after a failure</small></button>
+<button id="playstart">Play from start</button><button id="playstop" style="background:var(--bad)">Stop</button></div>
+<div id="seq" style="margin-top:6px;font-size:12px;color:var(--dim)"></div>
+<pre id="playlog" style="background:#05080b;border-radius:8px;padding:8px;height:150px;overflow:auto;font-size:12px;margin:8px 0 0;white-space:pre-wrap">(pick log)</pre>
 <h2>Saved poses (joint angles)</h2><div class="grid" style="grid-template-columns:2fr 1fr">
 <input id="posename" placeholder="name, e.g. above_neck" style="font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:#0b0f14;color:var(--text)">
 <button id="savepose" class="green">Save pose</button></div>
@@ -457,7 +502,13 @@ function showPoses(p){const key=JSON.stringify(p||{});if(key===posesShown)return
  <button data-go="${n}">go</button><button data-del="${n}">delete</button></div>`).join('')||'<small style="color:var(--dim)">none yet</small>';
  document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>{if(confirm('Move the RoArm to pose '+b.dataset.go+'?'))get('/roarm/goto_pose?name='+b.dataset.go)});
  document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{if(confirm('Delete pose '+b.dataset.del+'?'))get('/roarm/delete_pose?name='+b.dataset.del)})}
-async function refresh(){const d=await get('/roarm/state');showPoses(d.poses);if(d.x!==undefined){$('px').textContent=Math.round(Math.hypot(d.x,d.y))+' mm';$('py').textContent=Math.round(Math.atan2(d.y,d.x)*180/Math.PI)+' deg';$('pz').textContent=Math.round(d.z)+' mm'}
+$('play').onclick=()=>get('/roarm/play?from=continue');
+$('playstart').onclick=()=>{if(confirm('Run the whole pick sequence from the first pose?'))get('/roarm/play?from=start')};
+$('playstop').onclick=()=>get('/roarm/command?c=stop');
+function showPlay(d){const p=d.playing||{};$('play').disabled=$('playstart').disabled=!!p.running;
+ $('seq').textContent=d.sequence?('route: '+d.sequence.join(' > ')):'';
+ if(p.log&&p.log.length){const l=$('playlog'),t=p.log.join('\n');if(l.textContent!==t){l.textContent=t;l.scrollTop=l.scrollHeight}}}
+async function refresh(){const d=await get('/roarm/state');showPoses(d.poses);showPlay(d);if(d.x!==undefined){$('px').textContent=Math.round(Math.hypot(d.x,d.y))+' mm';$('py').textContent=Math.round(Math.atan2(d.y,d.x)*180/Math.PI)+' deg';$('pz').textContent=Math.round(d.z)+' mm'}
  roarm=d;bar($('lshoulder'),d.shoulder_load);bar($('lelbow'),d.elbow_load);
  $('t-shoulder').textContent=d.shoulder_load!=null?Math.abs(d.shoulder_load):'-';$('t-elbow').textContent=d.elbow_load!=null?Math.abs(d.elbow_load):'-';
  $('msg').textContent=d.message||'';$('msg').className=(!d.connected||/OVERLOAD/.test(d.message||''))?'bad':'';
