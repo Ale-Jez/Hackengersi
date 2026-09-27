@@ -22,6 +22,7 @@ pip install -r requirements.txt
 python Raspberry/main.py selftest
 python Raspberry-Auto/drive.py selftest
 python dorm_keeper/roarm_pick.py --test
+python Raspberry/roarm_usb.py --test
 ```
 
 ## ⚠️ Hardware Safety Checklist
@@ -32,7 +33,8 @@ Before working with the robot:
 - [ ] RoArm speed ≤ 0.25 in config
 - [ ] CubeBot wheels are **off the ground** for initial testing
 - [ ] Someone is ready to **pull the power plug** if anything goes wrong
-- [ ] Shoulder temperature checked after each test session
+- [ ] Shoulder temperature checked after each test session (panel shows it live)
+- [ ] Shut the Pi down with `sudo poweroff` before pulling power
 
 ## 🔀 Git Workflow
 
@@ -48,6 +50,8 @@ Before working with the robot:
 | Arm + vision code | `Raspberry/` |
 | Driving code | `Raspberry-Auto/` |
 | Bottle inspection / deposit | `dorm_keeper/` |
+| RoArm USB bridge | `Raspberry/roarm_usb.py` |
 | Hardware docs | `Docs/` |
 | Config values | `config.json` in each module |
 | AprilTag images | `AprilTags/` |
+| Deployment to Pi | `dorm_keeper/deploy_to_pi.py` |

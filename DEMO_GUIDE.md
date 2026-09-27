@@ -4,6 +4,8 @@
 
 ### Power & Connections
 - [ ] RoArm powered at **7.4–8.4 V** (check with multimeter!)
+- [ ] RoArm USB cable in Pi #1 (CP2102 port on the arm)
+- [ ] `roarm_usb.py` running (or roarm-usb systemd service enabled)
 - [ ] SO-101 USB connected to Pi #1
 - [ ] Camera USB connected to Pi #1
 - [ ] CubeBot motors powered, CANdle USB in Pi #2
@@ -15,6 +17,7 @@
 - [ ] `python drive.py selftest` passes on Pi #2
 - [ ] `python vision.py ping` returns OK (Brev connection)
 - [ ] `so101_station.py` web UI accessible at `http://malina:8765/`
+- [ ] `stream.py` live camera at `http://malina-auto:8000/` (useful for tuning)
 
 ### Calibration
 - [ ] Camera-to-arm calibration is fresh (recalibrate if anything moved)
@@ -60,7 +63,7 @@ python main.py sort    # Clear any remaining items
 
 # Refill the bin with demo items
 # Verify AprilTags are in position
-# Check RoArm temperature (cool down if warm)
+# Check RoArm temperature on the panel (http://malina:8765/roarm_panel)
 ```
 
 ---
@@ -69,9 +72,9 @@ python main.py sort    # Clear any remaining items
 
 | Failure | Recovery | Time |
 |---------|----------|------|
-| RoArm stops responding | Power cycle arm, restart `main.py` | 30 sec |
+| RoArm stops responding | Check USB cable. `systemctl --user restart roarm-usb`. Restart `main.py` | 30 sec |
 | LLM returns wrong labels | `python vision.py photo p.jpg && python vision.py ask p.jpg` to debug. Check lighting. | 1 min |
-| CubeBot overshoots tag | `python drive.py tag <id> <stop_px>` to manually reposition | 30 sec |
+| CubeBot overshoots tag | `python drive.py tag <id> <stop_px>` to manually reposition. Check live view at `http://malina-auto:8000/` | 30 sec |
 | Camera image is dark | `v4l2-ctl --set-ctrl brightness=128` or move to better lighting | 15 sec |
 | Calibration is off | `python main.py calibrate` (takes ~2 min with tag on gripper) | 2 min |
 | Nothing works | Run the sort cycle only (skip driving): `python main.py sort` | Instant |
@@ -81,9 +84,11 @@ python main.py sort    # Clear any remaining items
 
 ## 💬 Key Talking Points
 
-- **Self-calibrating:** the robot teaches itself pixel-to-millimeter mapping
+- **Self-calibrating:** the robot teaches itself pixel-to-millimeter mapping (AprilTag or VLM-based)
 - **Real DRS integration:** follows Kaucja.pl API flow (mock server, ready for real credentials)
 - **No ROS:** pure Python, runs on stock Raspberry Pi OS
 - **Obstacle-aware:** floor-colour learning for safety stops
 - **Cloud-edge split:** heavy AI on GPU, real-time control on Pi
 - **Every module has tests:** `selftest` commands work without any hardware
+- **USB bridge:** RoArm connected over USB serial — no WiFi needed, same HTTP API
+- **Live camera stream:** `stream.py` gives a browser view with tags and obstacles

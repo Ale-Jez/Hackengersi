@@ -39,24 +39,25 @@ A cloud GPU (**Nvidia Brev**) runs a **Qwen2.5-VL-7B** vision-language model tha
                                     └────────┬────────────────┘
                                              │ HTTPS (Tailscale)
                                              │
-┌──────────────┐   USB servo bus   ┌─────────┴─────────┐   WiFi HTTP /js   ┌──────────────┐
-│   SO-101     │◄─────────────────►│   Raspberry Pi 5  │◄────────────────►│  RoArm-M3    │
-│  (scanner)   │                   │   8GB (malina)    │                   │  (picker)    │
-│  + USB cam   │◄── USB ──────────►│                   │                   │  5-DOF +     │
-│  6-DOF       │                   │   main.py         │                   │  gripper     │
-└──────────────┘                   │   vision.py       │                   └──────────────┘
+┌──────────────┐   USB servo bus   ┌─────────┴─────────┐  USB serial (CP2102) ┌──────────────┐
+│   SO-101     │◄─────────────────►│   Raspberry Pi 5  │◄───────────────────►│  RoArm-M3    │
+│  (scanner)   │                   │   8GB (malina)    │  roarm_usb.py →     │  (picker)    │
+│  + USB cam   │◄── USB ──────────►│                   │  localhost:8766     │  5-DOF +     │
+│  6-DOF       │                   │   main.py         │  (same HTTP API)    │  gripper     │
+└──────────────┘                   │   vision.py       │                     └──────────────┘
                                    │   roarm_wifi.py   │
+                                   │   roarm_usb.py    │
                                    │   so101.py        │
                                    └───────────────────┘
 
-┌──────────────────────────────────────────────────────────────────────┐
-│                     CubeBot (Driving Base)                          │
-│  Raspberry Pi 5 8GB (malina-auto)                                  │
-│  2x MAB MA-D-GL40 KV70 direct-drive actuators                     │
-│  CANdle USB-to-CAN FD dongle                                      │
-│  Forward USB camera for AprilTag navigation + obstacle detection   │
-│  drive.py · motors.py · vision.py                                  │
-└──────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                     CubeBot (Driving Base)                                  │
+│  Raspberry Pi 5 8GB (malina-auto)                                          │
+│  2x MAB MA-D-GL40 KV70 direct-drive actuators                             │
+│  CANdle USB-to-CAN FD dongle                                              │
+│  Forward USB / CSI camera for AprilTag navigation + obstacle detection     │
+│  drive.py · motors.py · vision.py · stream.py                              │
+└──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -67,7 +68,8 @@ A cloud GPU (**Nvidia Brev**) runs a **Qwen2.5-VL-7B** vision-language model tha
 .
 ├── Raspberry/            # Sorting station controller (Pi #1: arms + vision)
 │   ├── main.py           # Route driving, sort cycle, calibration, selftest
-│   ├── roarm_wifi.py     # RoArm-M3 over WiFi (HTTP /js commands, WebSocket feedback)
+│   ├── roarm_wifi.py     # RoArm-M3 HTTP client (/js commands, /ws feedback)
+│   ├── roarm_usb.py      # RoArm USB-serial bridge → localhost:8766 (same HTTP API)
 │   ├── roarm_console.py  # Keyboard jog for teaching RoArm positions
 │   ├── so101.py          # SO-101 arm over USB (save/go named poses)
 │   ├── vision.py         # Camera, AprilTags, homography, Brev LLM client
@@ -77,16 +79,19 @@ A cloud GPU (**Nvidia Brev**) runs a **Qwen2.5-VL-7B** vision-language model tha
 │   ├── drive.py          # Route driving: tag approach, search, obstacle stop
 │   ├── motors.py         # Wheel control via CANdle (velocity mode, ramp, watchdog)
 │   ├── vision.py         # Camera, AprilTag detection, floor-colour obstacle check
+│   ├── stream.py         # Live annotated camera view at http://<pi>:8000
 │   └── config.json       # CAN IDs, wheel signs, speeds, steering tuning, route
 │
 ├── dorm_keeper/          # SO-101 camera station + RoArm picking
 │   ├── so101_station.py  # SO-101 all-in-one: camera, YOLO detection, barcode reading,
 │   │                     #   arm tracking, web UI (http://<IP>:8765/), Xbox controller
-│   ├── roarm_pick.py     # Camera -> RoArm calibration (AprilTag / VLM) and grab
-│   ├── roarm_panel.py    # RoArm control page (http://<IP>:8765/roarm_panel)
+│   ├── roarm_pick.py     # Camera → RoArm calibration (AprilTag / VLM) and grab
+│   ├── roarm_panel.py    # RoArm control page (http://<IP>:8765/roarm_panel):
+│   │                     #   per-joint jog, hold-to-move, servo temperature & load,
+│   │                     #   upside-down support
 │   ├── demo.html         # Presentation view (http://<IP>:8765/demo)
 │   ├── yolo_laptop.py    # GPU-accelerated YOLO worker (runs on Brev)
-│   └── deploy_to_pi.py   # Copy the code to the Pi and restart the service
+│   └── deploy_to_pi.py   # Deploy code to the Pi + manage dorm-keeper systemd service
 │
 ├── Station/              # Early-stage station code (RoArm via USB serial)
 │   ├── roarm.py          # RoArm-M3 over USB serial (JSON lines, 115200 baud)
@@ -107,7 +112,8 @@ A cloud GPU (**Nvidia Brev**) runs a **Qwen2.5-VL-7B** vision-language model tha
 │   ├── arm.md            # RoArm-M3 Pro & SO-101 hardware specs and usage
 │   ├── bom.md            # Bill of materials
 │   ├── drs-api.md        # Kaucja.pl deposit system API documentation
-│   └── plan/             # Step-by-step build & calibration plan (7 phases)
+│   ├── plan/             # Step-by-step build & calibration plan (7 phases)
+│   └── RoArm-M3/         # RoArm hardware docs + custom firmware (0.84-temp)
 │
 ├── requirements.txt      # Python dependencies
 └── .gitignore
@@ -125,7 +131,7 @@ A cloud GPU (**Nvidia Brev**) runs a **Qwen2.5-VL-7B** vision-language model tha
 | Mobile base | CubeBot | 1 | Drives the trash can around |
 | Drive motors | MAB MA-D-GL40 KV70 | 2 | Direct-drive wheel actuators |
 | CAN adapter | CANdle USB-to-CAN FD | 1 | Motor bus communication |
-| USB cameras | Generic USB camera | 2 | Overhead view + forward navigation |
+| Cameras | USB + CSI (Camera Module 3) | 2 | Overhead view + forward navigation |
 | Cloud GPU | Nvidia Brev instance | 1 | Runs Qwen2.5-VL-7B + YOLO |
 
 ---
@@ -136,6 +142,7 @@ A cloud GPU (**Nvidia Brev**) runs a **Qwen2.5-VL-7B** vision-language model tha
 
 - Python 3.10+
 - OpenCV, NumPy, requests, pyserial, zxing-cpp, feetech-servo-sdk
+- candlesdk (for CubeBot wheels — build from git, see `Raspberry-Auto/README.md`)
 - Tailscale (for Brev ↔ Pi networking)
 
 ### 1. Clone
@@ -161,6 +168,9 @@ pip install -r requirements.txt
 
 # Set the Brev API key
 export BREV_KEY=<key from Brev setup>
+
+# Start the RoArm USB bridge (if using USB instead of WiFi)
+python roarm_usb.py &   # serves on localhost:8766
 
 # Self-test (no hardware needed)
 python main.py selftest
@@ -259,10 +269,12 @@ The CubeBot follows a route defined in `config.json`:
 | Step type | Meaning |
 |-----------|---------|
 | `tag` | Drive toward AprilTag until it appears `stop_px` pixels wide |
-| `drive` | Blind timed move: `[left_speed, right_speed, seconds]` |
+| `drive` | Blind timed move: `[left_speed, right_speed, seconds]` (obstacle check still active for forward moves) |
 | `sort` | Run the full sorting cycle at current position |
 | `wait` | Pause for N seconds |
-| `cmd` | Execute a shell command (e.g., SSH to the arm Pi) |
+| `cmd` | Execute a shell command and wait (e.g., `ssh malina 'python main.py sort'`) |
+
+**Live camera view:** `python stream.py` on Pi #2 serves an annotated MJPEG stream at `http://<pi>:8000` — shows tag IDs, pixel size, estimated distance, the obstacle corridor, and detection rate. Useful for tuning `stop_px` and `tag_focal_px`.
 
 **Steering:** hybrid arc/spin. Small heading error → both wheels forward, inner wheel slowed. Large error → spin in place. Hysteresis prevents oscillation.
 
@@ -278,9 +290,10 @@ The CubeBot follows a route defined in `config.json`:
 |------|--------|
 | **RoArm: 7.4–8.4 V ONLY** | Shoulder uses Feetech STS3215 (7.4 V rated). The 12 V adapter has already damaged servos. |
 | **Never send `T:0`** | Freezes firmware for ~10 s; arm can drop. `roarm_wifi.py` blocks this command. |
-| **Keep RoArm slow** (`spd ≤ 0.25`) | Only handle light, empty items. Check shoulder temperature after each session. |
+| **Keep RoArm slow** (`spd ≤ 0.25`) | Only handle light, empty items. The panel shows servo temperatures and loads; motion is blocked above 65 °C. |
 | **`T:210` (torque off):** hold the arm | It moves to a fixed pose first. Support by hand to prevent drops. |
 | **CANdle:** wheels off the ground first | Test wheel direction before putting CubeBot on the floor. |
+| **Shut Pi down cleanly** | `sudo poweroff` — a hard power cut has already corrupted an SD card. |
 
 ---
 
@@ -305,6 +318,7 @@ Every module has a `selftest` command that runs without hardware:
 python main.py selftest       # Sorting logic (mock arms, camera, LLM)
 python drive.py selftest      # Steering, obstacle, approach logic
 python roarm_pick.py --test   # Calibration, kinematics and grab logic (mock arms and camera)
+python roarm_usb.py --test    # USB-serial bridge HTTP layer (no arm needed)
 ```
 
 ---

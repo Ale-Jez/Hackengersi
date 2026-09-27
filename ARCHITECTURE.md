@@ -19,9 +19,10 @@ graph TB
         MAIN[main.py] --> ROARM[roarm_wifi.py]
         MAIN --> SO[so101.py]
         MAIN --> VIS[vision.py]
+        USB_BR[roarm_usb.py] -->|USB serial CP2102| ARM[RoArm-M3 Pro]
+        ROARM -->|HTTP localhost:8766| USB_BR
         SO --> STS[STS3215 Servo Bus<br>USB]
         VIS --> CAM1[Overhead Camera<br>USB]
-        ROARM -->|WiFi HTTP /js| ARM[RoArm-M3 Pro]
     end
 
     subgraph Brev["☁️ Nvidia Brev (Cloud GPU)"]
@@ -37,11 +38,13 @@ graph TB
 
 | Link | Protocol | Port | Auth |
 |------|----------|------|------|
-| Pi #1 → RoArm-M3 | HTTP (`/js?json=...`) | 80 | None (local WiFi) |
+| Pi #1 → RoArm-M3 (USB) | USB serial (CP2102, 115200 baud) via `roarm_usb.py` | localhost:8766 | — |
+| Pi #1 → RoArm-M3 (WiFi) | HTTP (`/js?json=...`) | 80 | None (local WiFi) |
 | Pi #1 → SO-101 | USB Serial (Feetech STS3215 bus) | — | — |
 | Pi #1 → Brev (LLM) | HTTPS (OpenAI-compatible) | 8000 | Bearer `$BREV_KEY` |
 | Pi #1 → Brev (YOLO) | HTTP | 8000 | — |
 | Pi #2 → Wheels | CAN FD via CANdle USB | — | — |
+| Pi #2 camera stream | HTTP MJPEG (`stream.py`) | 8000 | — |
 | Pi #1 ↔ Pi #2 | SSH / HTTP | 22 / custom | — |
 | All ↔ Tailscale | WireGuard | — | Tailscale auth |
 
@@ -112,15 +115,21 @@ graph TB
 
 ```
 main.py
-├── roarm_wifi.py    (RoArm HTTP client)
+├── roarm_wifi.py    (RoArm HTTP client → roarm_usb.py on localhost:8766)
 ├── so101.py         (SO-101 USB servo control)
 └── vision.py        (camera, tags, homography, LLM)
+
+roarm_usb.py         (USB serial ↔ HTTP bridge, serves /js on localhost:8766)
 
 drive.py
 ├── motors.py        (CANdle wheel control)
 └── vision.py        (camera, tags, obstacles)
 
+stream.py            (live MJPEG camera view, imports vision + motors)
+
 roarm_pick.py
 ├── roarm_wifi.py        (shared with Raspberry/)
 └── so101_station.py HTTP (SO-101 via web API)
+
+roarm_panel.py           (served by so101_station.py at /roarm_panel)
 ```

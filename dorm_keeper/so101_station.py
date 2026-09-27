@@ -2699,7 +2699,9 @@ class BottleTracker(Tracker):
         x0, y0, x1, y1 = current["box"]
         dist = {"top": y0, "bottom": height - y1, "left": x0, "right": width - x1}
         for edge, d in dist.items():
-            self._cut[edge] = d <= 3 if not self._cut[edge] else d < 25
+            # the basket is usually bigger than the frame: its box touching the edges is not a cut-off bottle (that
+            # would cap the speed at CUT_MAX_SPEED and stop vertical centring) - aim at the visible middle instead
+            self._cut[edge] = False if current["cls"] == "basket" else (d <= 3 if not self._cut[edge] else d < 25)
         # where the code is on the bottle: remember it (relative to the full box) and keep aiming there - no jumping
         # between "code read" and "middle of the label"
         if current.get("code_xy"):
