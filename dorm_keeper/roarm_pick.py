@@ -47,6 +47,7 @@ DEFAULTS = {
     "roarm_ip": None,             # None = from Raspberry/config.json
     "so101_url": "http://localhost:8765",
     "speed": 0.2,                 # RoArm speed (firmware fraction, max 0.25: the shoulder heats up)
+    "settle_rad": 0.15,           # a pose counts as reached when the arm has stopped this close to it (loaded shoulder)
     "approach_mm": 80,            # above a grab point: first this much higher
     "grip_open": 1.57,
     "grip_closed": 3.14,
@@ -58,10 +59,10 @@ DEFAULTS = {
     "rest": None,                 # joint angles where the RoArm waits for the vehicle: python roarm_pick.py save-rest
     "poses": {},                  # named joint-angle poses (RoArm panel "Save pose" / save-pose NAME)
     # --- auto: SO-101 sees a bottle -> it moves aside ("away" pose) -> the RoArm plays the sequence -> back ---
-    "detect_conf": 0.4,           # one YOLO detection of a bottle with at least this confidence starts a pick
-    "detect_s": 1.0,              # wait this long (s) after the detection, then the RoArm starts
+    "show_s": 2.0,                # AUTO: the SO-101 shows off this long at M, then moves away and the RoArm starts
     "so101_away_pose": "away",    # SO-101 pose (its panel: "Save as AWAY pose"); missing = the SO-101 stays
     "after_pick_s": 3.0,          # pause after a pick before watching for the next bottle
+    "auto_routes": ["bottle", "chicken"],  # AUTO plays these routes one after another (the bottle starts it)
     # --- calibration (tag / brev) ---
     "brev_url": None, "brev_model": None,  # None = from Raspberry/config.json (key: $BREV_KEY or ~/.bashrc)
     "cal_center": [250, 0],       # x, y (mm): grid centre - in RoArm reach and in the SO-101 camera view
@@ -241,6 +242,10 @@ class SO101:
         r.raise_for_status()
         h, w = cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_GRAYSCALE).shape
         return r.content, w, h
+
+    def key(self, k):
+        """One SO-101 panel key (as pressed in its page): a..d / j..l moves, 1..3 key speed."""
+        self._get("/key", k=k)
 
     def pose(self, name):
         """SO-101 to its saved pose `name` (e.g. "away")."""
@@ -765,6 +770,7 @@ def go_pose(arm, cfg, name, timeout=25.0, stop=None):
         return
     deadline = time.monotonic() + timeout
     g_prev, g_still_since = None, None
+    joints_prev, joints_still_since = None, None
     while time.monotonic() < deadline:
         time.sleep(0.3)
         try:
@@ -783,7 +789,17 @@ def go_pose(arm, cfg, name, timeout=25.0, stop=None):
         # the jaws are there, or have stopped (closed on the bottle neck / at their limit) for 0.6 s
         grip_done = not grip_moves or abs(g - pose["g"]) < 0.1 or (
             g_still_since is not None and time.monotonic() - g_still_since > 0.6)
-        if max(abs(w[k] - pose[k]) for k in "bset") < 0.08 and grip_done:
+        # arm stopped short of the pose: the Feetech shoulder sags under load (holding the chicken low it stopped
+        # 0.084 rad short with load 276, 2026-09-27) - stopped within settle_rad = there; farther = really blocked
+        if joints_prev is not None and max(abs(w[k] - joints_prev[k]) for k in "bset") < 0.01:
+            joints_still_since = joints_still_since or time.monotonic()
+        else:
+            joints_still_since = None
+        joints_prev = {k: w[k] for k in "bset"}
+        err = max(abs(w[k] - pose[k]) for k in "bset")
+        settled = (joints_still_since is not None and time.monotonic() - joints_still_since > 0.6
+                   and err < cfg.get("settle_rad", 0.15))
+        if (err < 0.08 or settled) and grip_done:
             if grip_moves and pose["g"] < start_g:  # opened: give the bottle time to fall before moving on
                 time.sleep(cfg.get("release_s", 0.5))
             return
@@ -948,60 +964,75 @@ def abort(arm, so, cfg, log=print, progress_file=None):
     log("aborted: RoArm at rest, SO-101 at M")
 
 
-def wait_for_bottle(so, stop=None, min_conf=0.7, poll=0.1):
-    """Until YOLO sees a bottle with confidence >= min_conf - once is enough. Returns that detection."""
-    while True:
-        if stop is not None and stop.is_set():
-            raise Stopped("stopped while waiting for a bottle")
-        best = max((b for b in so.bottles().get("bottles", []) if b["cls"] == "bottle"),
-                   key=lambda b: b["conf"], default=None)
-        if best and best["conf"] >= min_conf:
-            return best
-        time.sleep(poll)
+SHOW_KEYS = "aaaaaa" + "dddddddddddd" + "aaaaaa"  # SO-101 base: left, right, back to the middle (key presses)
 
 
-def auto(arm, so, cfg, log=print, stop=None, cycles=1, progress_file=None):
+def show(so, seconds, stop=None):
+    """The SO-101's show before the pick: at the fastest key speed it shakes its head - the base left, right and back
+    where it started (~10 deg each way) - spread over `seconds`. Then the key speed goes back to the default."""
+    so.key("3")
+    try:
+        for k in SHOW_KEYS:
+            if stop is not None and stop.is_set():
+                raise Stopped("stopped during the SO-101 show")
+            so.key(k)
+            time.sleep(seconds / len(SHOW_KEYS))
+    finally:
+        so.key("2")
+
+
+def auto(arm, so, cfg, log=print, stop=None, cycles=1, progress_file=None, resume=False):
     """Demo loop: 1. both arms to their waiting poses - the RoArm to rest first (it clears the table), then the
-    SO-101 to its saved look pose (key M), tracking off; 2. the SO-101 detects a bottle;
-    3. after detect_s the RoArm starts the taught sequence AND the SO-101 moves to its "away" pose at the same time;
-    4. the sequence ends with the RoArm at rest - and AUTO ends (one bottle per press; cycles=None = loop, with the
-    SO-101 back at M and after_pick_s between picks). The sequence resumes at a failed step."""
+    SO-101 to its saved look pose (key M), tracking off; 2. the SO-101 shows off for show_s (no bottle detection),
+    then it moves to its "away" pose and the RoArm starts the bottle route at the same time; 3. right after it, the next routes of cfg "auto_routes" (the chicken - taught, no detection), each ending at
+    rest - and AUTO ends (cycles=None = loop, with the SO-101 back at M and after_pick_s between picks).
+    resume (Continue after a Stop / failure inside AUTO): a route stopped half-way goes on at its stopped step
+    right away - no rest, no M, no waiting for a bottle that is already picked - then the routes after it."""
+    routes = [r for r in cfg.get("auto_routes") or ["bottle"] if r in route_names(cfg)]
     done = 0
     while cycles is None or done < cycles:
-        so.demo("start")  # /demo: stage 1 searching (the scripted presentation runs only in AUTO)
-        so.tracking(False)  # the camera must not follow the bottle into the RoArm's path
-        if not at_rest(arm, cfg):  # already there: no needless lift-and-return
-            log("RoArm to its rest pose...")
-            so.status("RoArm to rest")
-            go_rest(arm, cfg)
-        if stop is not None and stop.is_set():
-            raise Stopped("stopped while the RoArm went to rest")
-        so.look(force=True)  # M pose - also when it comes from "away" (far from M)
-        wait_for_look(so, stop=stop)
-        so.status("waiting for a bottle")
-        log("SO-101 at M - waiting for a bottle...")
-        seen = wait_for_bottle(so, stop, cfg["detect_conf"])
-        so.demo("seen")  # /demo: centering now, reading the code after 1 s, the result after 1 s more
-        log(f"bottle detected ({seen['conf']:.0%}) - RoArm starts in {cfg['detect_s']:.0f} s")
-        so.status("bottle detected")
-        deadline = time.monotonic() + cfg["detect_s"]
-        while time.monotonic() < deadline:
-            if stop is not None and stop.is_set():
-                raise Stopped("stopped before the pick")
-            time.sleep(0.05)
-        away = cfg.get("so101_away_pose")
-        if away:  # the SO-101 moves aside while the RoArm already starts (the station moves it in its own thread)
-            so.pose(away)
-            log(f"SO-101 -> {away}")
-        so.status("picking")
-        play(arm, cfg, log=log, stop=stop, progress_file=progress_file)
+        paused = paused_route(cfg, progress_file) if resume else None
+        resume = False  # only the first round resumes
+        if paused in routes:
+            log(f"resuming the {paused} route at its stopped step")
+            first = routes.index(paused)
+        else:
+            first = 0
+            pick_ready(arm, so, cfg, log, stop)
+        for route in routes[first:]:
+            so.status(f"picking: {route}")
+            if len(routes) > 1:
+                log(f"--- {route} route ---")
+            play(arm, cfg, log=log, stop=stop, progress_file=progress_file, route=route)
         done += 1
-        log(f"pick {done} done - RoArm at rest")
+        log(f"pick {done} done ({' + '.join(routes[first:])}) - RoArm at rest")
         so.status(f"pick {done} done")
         if cycles is not None and done >= cycles:
             break
         time.sleep(cfg["after_pick_s"])
     return done
+
+
+def pick_ready(arm, so, cfg, log=print, stop=None):
+    """AUTO until the RoArm may start: waiting poses, the SO-101's show (show_s), the SO-101 out of the way."""
+    so.demo("start")  # /demo: stage 1 searching (the scripted presentation runs only in AUTO)
+    so.tracking(False)  # the camera must not follow the bottle into the RoArm's path
+    if not at_rest(arm, cfg):  # already there: no needless lift-and-return
+        log("RoArm to its rest pose...")
+        so.status("RoArm to rest")
+        go_rest(arm, cfg)
+    if stop is not None and stop.is_set():
+        raise Stopped("stopped while the RoArm went to rest")
+    so.look(force=True)  # M pose - also when it comes from "away" (far from M)
+    wait_for_look(so, stop=stop)
+    so.demo("seen")  # /demo: centering now, reading the code after 1 s, the result after 1 s more (= the show)
+    log(f"SO-101 at M - its show ({cfg['show_s']:.0f} s), then the RoArm starts")
+    so.status("SO-101 show")
+    show(so, cfg["show_s"], stop)
+    away = cfg.get("so101_away_pose")
+    if away:  # the SO-101 moves aside while the RoArm already starts (the station moves it in its own thread)
+        so.pose(away)
+        log(f"SO-101 -> {away}")
 
 
 # ----------------------------------------------------------------------------- test without hardware
@@ -1146,13 +1177,16 @@ def test():
         class AutoSO(FakeSO):
             def __init__(self):
                 super().__init__()
-                self.calls, self.seen_n = [], 0
+                self.calls, self.seen_n, self.keys = [], 0, ""
 
             def look(self, force=False):
                 self.calls.append("look")
 
             def pose(self, name):
                 self.calls.append("pose:" + name)
+
+            def key(self, k):
+                self.keys += k
 
             def bottles(self):
                 self.seen_n += 1  # nothing for 3 polls, then a bottle
@@ -1165,18 +1199,43 @@ def test():
             send_orig = arm2.send
             arm2.send = lambda c: (aso.calls.append("roarm:rest") if c.get("T") == 102 else None, send_orig(c))
             arm2.fb.update(b=1.0, s=0.5, e=1.0, t=0.0, g=3.0)  # not at rest
-            n = auto(arm2, aso, dict(pcfg, detect_s=0.2, after_pick_s=0), log=lambda *_: None, cycles=1,
+            n = auto(arm2, aso, dict(pcfg, show_s=0.05, after_pick_s=0), log=lambda *_: None, cycles=1,
                      progress_file=os.path.join(tempfile.mkdtemp(), "p.json"))
             # AUTO pressed: RoArm to rest FIRST, then the SO-101 to M; one bottle, then AUTO ends
             assert n == 1 and aso.calls == ["roarm:rest", "look", "pose:away"], aso.calls
             assert aso.demo_events == ["start", "seen"], aso.demo_events  # /demo story: searching, bottle seen
+            assert aso.keys == "3" + SHOW_KEYS + "2" and SHOW_KEYS.count("a") == SHOW_KEYS.count("d"), aso.keys
             assert reached == ["rest", "aim", "grip", "lift", "rest"] and aso.tracks is False, reached
             rest = pcfg["poses"]["rest"]
             arm2.fb.update(b=rest["b"], s=rest["s"], e=rest["e"], t=rest["t"])  # already at rest: no lift-and-return
             aso = AutoSO()
-            auto(arm2, aso, dict(pcfg, detect_s=0.2, after_pick_s=0), log=lambda *_: None, cycles=1,
+            auto(arm2, aso, dict(pcfg, show_s=0.05, after_pick_s=0), log=lambda *_: None, cycles=1,
                  progress_file=os.path.join(tempfile.mkdtemp(), "p.json"))
             assert aso.calls[0] == "look", aso.calls
+            # AUTO = the bottle route, then the chicken route right away (one detection, one "away")
+            ccfg = dict(pcfg, show_s=0.05, after_pick_s=0, poses=dict(pcfg["poses"], **{"chicken-grab": pcfg["poses"]["aim"]}),
+                        sequence=["rest", "aim", "grip", "lift", "rest"], routes={"chicken": ["rest", "chicken-grab", "rest"]})
+            cprog = os.path.join(tempfile.mkdtemp(), "p.json")
+            reached.clear()
+            aso = AutoSO()
+            assert auto(arm2, aso, ccfg, log=lambda *_: None, cycles=1, progress_file=cprog) == 1
+            bottle_route = sequence_of(ccfg, "bottle")
+            assert reached == bottle_route + ["rest", "chicken-grab", "rest"], reached
+            assert aso.calls == ["look", "pose:away"] and aso.demo_events == ["start", "seen"], aso.calls
+            # Continue after a stop inside the chicken route: straight on at that step - no rest, no M, no bottle wait
+            with open(cprog, "w") as f:
+                json.dump({"sequence": sequence_of(ccfg, "chicken"), "next": 1}, f)
+            reached.clear()
+            aso = AutoSO()
+            auto(arm2, aso, ccfg, log=lambda *_: None, cycles=1, progress_file=cprog, resume=True)
+            assert reached == ["chicken-grab", "rest"] and aso.calls == [] and aso.keys == "", (reached, aso.calls)
+            # a fresh AUTO press (not Continue) with that stale progress: the whole thing from detection again
+            with open(cprog, "w") as f:
+                json.dump({"sequence": sequence_of(ccfg, "chicken"), "next": 1}, f)
+            reached.clear()
+            aso = AutoSO()
+            auto(arm2, aso, ccfg, log=lambda *_: None, cycles=1, progress_file=cprog)
+            assert aso.calls == ["look", "pose:away"] and reached[:len(bottle_route)] == bottle_route, (reached, aso.calls)
             arm2.send = send_orig
         finally:
             globals()["go_pose"] = orig_go_pose
@@ -1234,6 +1293,29 @@ def test():
                                   **{k: rest_hi[k] for k in "bset"})
         go_rest(back, dict(cfg, rest=rest_hi), timeout=2)
         assert [c["T"] for c in back.sent] == [102, 210, 102] and back.sent[1]["cmd"] == 1, back.sent
+
+        # a loaded shoulder stops short: 0.084 rad off and still -> reached; 0.3 rad off and still -> blocked (error)
+        class Sagging:
+            mock, volts = False, None
+
+            def __init__(self, off):
+                self.off, self.sent = off, []
+
+            def where(self):
+                pose = cfg_sag["poses"]["low"]
+                return dict(pose, s=pose["s"] + self.off, tit=0.0, x=0.0, y=0.0, z=0.0)
+
+            def send(self, c):
+                self.sent.append(c)
+        cfg_sag = dict(cfg, poses={"low": {"b": 2.628, "s": -0.112, "e": 1.761, "t": -1.055, "r": 2.674, "g": 2.309}})
+        t0 = time.monotonic()
+        go_pose(Sagging(0.084), cfg_sag, "low", timeout=5)
+        assert time.monotonic() - t0 < 3, "a settled pose must not wait for the timeout"
+        try:
+            go_pose(Sagging(0.3), cfg_sag, "low", timeout=2)
+            raise AssertionError("0.3 rad off is blocked, not reached")
+        except TimeoutError:
+            pass
 
         # abort after a stop: paused mission -> progress gone (next Play from the start), RoArm rest, then SO-101 to M
         prog = os.path.join(tempfile.mkdtemp(), "progress.json")
