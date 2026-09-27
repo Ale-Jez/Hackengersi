@@ -127,9 +127,12 @@ class SO101:
             0, 0,
             speed_ticks & 0xFF, (speed_ticks >> 8) & 0xFF,
         ]
-        res, _ = self.ph.writeTxRx(self.port, sid, ADDR_ACC, len(data), data)
-        if res != self._ok:
-            raise SO101Error(f"cannot send the goal to servo ID {sid}")
+        for _ in range(3):  # a single failed packet on the servo bus is normal - it killed the whole program
+            res, _ = self.ph.writeTxRx(self.port, sid, ADDR_ACC, len(data), data)
+            if res == self._ok:
+                return
+            time.sleep(0.005)
+        raise SO101Error(f"cannot send the goal to servo ID {sid}")
 
     def joints(self):
         return {name: _to_deg(self._read_pos(sid)) for name, sid in self.ids.items()}
@@ -2853,6 +2856,7 @@ def camera_mode(port=None, mock=False):
         create_sliders(tracking)
     message, message_until = "", 0.0
     was_busy = False
+    servo_errors = 0  # SO-101 bus errors in a row: shown and survived - the web panels (RoArm too) stay up
     t_web = t_clean = 0.0
     frame_nr, sharp = 0, 0.0
     t_servo, servo_nr = 0.0, -1  # SO-101 servo temperatures read one by one
@@ -2986,7 +2990,17 @@ def camera_mode(port=None, mock=False):
                                         tracking and not _busy.is_set() and TRACK_OBJECT == "bottle")
                 if msg_i:
                     show(msg_i)
-                pressed = st.step()
+                try:
+                    pressed = st.step()
+                    servo_errors = 0
+                except SO101Error as e:
+                    servo_errors, pressed = servo_errors + 1, set()
+                    if servo_errors == 1:
+                        show(f"SO-101: {e} - retrying")
+                    if servo_errors == 20 and tracking:  # ~1 s of errors: stop steering, keep the program running
+                        tracking, trk.target = False, None
+                        show("SO-101 servos not answering - tracking OFF (check the SO-101 power / cable)")
+                    time.sleep(0.05)
                 # for the RoArm: whether the camera stands still (image = table map only in the still look pose)
                 prev = _web.get("joints")
                 _web["joints"] = dict(st.here)
