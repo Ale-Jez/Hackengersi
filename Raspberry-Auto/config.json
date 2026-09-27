@@ -8,6 +8,8 @@
   "accel_rad_s2": 20.0,
   "max_torque": 0.6,
   "vel_pid": [0.06, 0.002, 0.0, 0.5],
+  "wheel_radius_m": 0.0414,
+  "track_m": 0.14,
 
   "camera": "csi",
   "camera_flip": false,
