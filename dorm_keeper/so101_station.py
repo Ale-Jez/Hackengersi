@@ -1217,8 +1217,9 @@ def http_server(arm):
             self.end_headers()
             self.wfile.write(body)
 
-        def _preview(self, clean=False):
-            """MJPEG: the browser shows it like a video (<img src="/preview">)."""
+        def _preview(self, clean=False, fps=None):
+            """MJPEG: the browser shows it like a video (<img src="/preview">). fps = at most this many frames/s to
+            this viewer (the RoArm panel: fewer frames leave WiFi room for its move requests)."""
             self.close_connection = True  # endless stream - the connection closes after it
             self.send_response(200)
             self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
@@ -1227,9 +1228,12 @@ def http_server(arm):
             counter = "viewers_clean" if clean else "viewers"
             key = "clean" if clean else "jpg"
             _web[counter] += 1
-            nr = -1
+            nr, t_sent = -1, 0.0
             try:
                 while True:
+                    if fps:
+                        time.sleep(max(0.0, t_sent + 1.0 / fps - time.time()))
+                        t_sent = time.time()
                     with _web_new:
                         _web_new.wait_for(lambda: _web.get("nr_" + key, 0) != nr, timeout=2)
                         jpg, nr = _web[key], _web.get("nr_" + key, 0)
@@ -1255,7 +1259,11 @@ def http_server(arm):
                 self.end_headers()
                 self.wfile.write(page)
             elif url.path == "/preview":
-                self._preview(clean="clean" in q)
+                try:
+                    fps = min(max(float(q.get("fps", 0)), 1.0), 30.0) if q.get("fps") else None
+                except ValueError:
+                    fps = None
+                self._preview(clean="clean" in q, fps=fps)
             elif url.path == "/frame":  # one fresh frame at full resolution (calibration: small tag)
                 import cv2
 

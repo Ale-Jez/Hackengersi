@@ -21,7 +21,8 @@ SERVO_HOT = (60, 65)             # deg C: from 65 motion is blocked (servo rests
 ROARM_SERVOS = ["base", "shoulder 1", "shoulder 2", "elbow", "wrist", "roll", "gripper"]  # order of "temp" in /ws
 Z_RANGE = (-150.0, 350.0)        # mm (RoArm upside down: upside_down, see _config)
 LOAD_STOP = 350                  # |shoulder/elbow load| (firmware units): above = STOP and hold
-KEEPALIVE = 0.35                 # s: no signal from the browser -> the arm stops (button released, WiFi dropped)
+KEEPALIVE = 0.6                  # s: no signal from the browser -> the arm stops (button released, WiFi dropped);
+                                 # 0.35 stopped the arm on ordinary WiFi hiccups (PC -> Pi ping up to 156 ms)
 # human moves (relative to the RoArm base): turn the whole base, reach out from the base, height, gripper
 DIRECTIONS = {"turn+": ("turn", 1), "turn-": ("turn", -1), "reach+": ("reach", 1), "reach-": ("reach", -1),
               "z+": ("z", 1), "z-": ("z", -1), "t+": ("t", 1), "t-": ("t", -1), "r+": ("r", 1), "r-": ("r", -1)}
@@ -356,7 +357,7 @@ main{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(320px,1fr);gap:14
 h1{font-size:20px;margin:0 0 4px}h2{font-size:13px;text-transform:uppercase;letter-spacing:1px;color:var(--dim);margin:14px 0 8px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
 img{width:100%;border-radius:10px;background:#000;display:block}
-#msg{font-weight:700;padding:10px 12px;border-radius:8px;background:#1a2330;margin:8px 0}
+#msg{font-weight:700;padding:10px 12px;border-radius:8px;background:#1a2330;margin:10px 0 0;font-size:17px}
 #msg.bad{background:#4d1f22;color:#ffb3b3}
 .pos{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;font-variant-numeric:tabular-nums}
 .pos div{background:#1a2330;border-radius:8px;padding:6px 8px}.pos b{display:block;font-size:18px}.pos span{font-size:12px;color:var(--dim)}
@@ -372,8 +373,8 @@ button:active,button.on{background:var(--accent);color:#06121e}button small{disp
 details{margin-top:8px;font-size:13px;color:var(--dim)}#servos{display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;margin-top:6px;font-variant-numeric:tabular-nums}
 </style></head><body><main>
 <div><div class="card"><h1>RoArm control</h1><span style="color:var(--dim)">SO-101 camera image (what the program sees)</span>
-<img src="/preview?clean=1" alt="SO-101 camera"></div></div>
-<div class="card"><div id="msg">connecting...</div>
+<img src="/preview?clean=1&fps=8" alt="SO-101 camera"><div id="msg">connecting...</div></div></div>
+<div class="card">
 <div class="pos"><div><span>reach</span><b id="px">-</b></div><div><span>base angle</span><b id="py">-</b></div><div><span>height</span><b id="pz">-</b></div></div>
 <h2>System</h2><div class="sys">
 <div class="row"><span>Raspberry CPU</span><div class="bar"><i id="s-cpu"></i></div><b id="t-cpu">-</b></div>
@@ -408,7 +409,7 @@ details{margin-top:8px;font-size:13px;color:var(--dim)}#servos{display:grid;grid
 </div></main><script>
 const $=id=>document.getElementById(id),get=u=>fetch(u).then(r=>r.json()).catch(()=>({}));
 let held=null,timer=null;
-function move(k){if(held===k)return;stop();held=k;get('/roarm/move?k='+encodeURIComponent(k));timer=setInterval(()=>get('/roarm/move?k='+encodeURIComponent(k)),120)}
+function move(k){if(held===k)return;stop();held=k;get('/roarm/move?k='+encodeURIComponent(k));timer=setInterval(()=>get('/roarm/move?k='+encodeURIComponent(k)),100)}
 function stop(){clearInterval(timer);timer=null;held=null}
 // "left" = YOUR left: standing in front of the robot its left is your right (base turn + = robot's left)
 let view='front';try{view=localStorage.getItem('roarm_view')||'front'}catch(e){}
