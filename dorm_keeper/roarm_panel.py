@@ -61,6 +61,7 @@ class RoArmPanel:
         self.hot = False
         self.playing = {"running": False, "log": []}  # the taught pick sequence (roarm_pick.play) in a thread
         self._stop = threading.Event()
+        self._abort_to_rest = False  # if True, go to rest pose after stopping
         threading.Thread(target=self._loop, daemon=True).start()
         threading.Thread(target=self._websocket, daemon=True).start()
 
@@ -334,7 +335,16 @@ class RoArmPanel:
                 else:
                     roarm_pick.play(arm, cfg, restart=restart, log=log, stop=self._stop)
             except roarm_pick.Stopped as e:
-                log(f"STOPPED: {e} - Play pick continues from here")
+                if self._abort_to_rest:
+                    log("ABORTED - returning to rest position...")
+                    try:
+                        roarm_pick.go_rest(arm, roarm_pick.load_config())
+                        log("Back at rest position")
+                    except Exception as e:
+                        log(f"ERROR going to rest: {e}")
+                    self._abort_to_rest = False
+                else:
+                    log(f"STOPPED: {e} - Play pick continues from here")
             except Exception as e:  # any failure: shown on the page, progress kept for the next Play pick
                 log(f"ERROR: {e} - Play pick continues from the failed step")
             finally:
@@ -385,6 +395,10 @@ def handle(h, path, q):
         return h._json({"ok": p.start_play(q["from"] == "start", auto=q["from"] == "auto")})
     if path == "/roarm/command" and q.get("c") == "stop" and p.playing["running"]:
         p._stop.set()  # the pick sequence holds the arm where it is and stops
+        return h._json({"ok": True})
+    if path == "/roarm/command" and q.get("c") == "abort_to_rest" and p.playing["running"]:
+        p._abort_to_rest = True
+        p._stop.set()  # stop the sequence, then go to rest in the run() finally block
         return h._json({"ok": True})
     if path == "/roarm/command" and q.get("c") in COMMANDS:
         with p._lock:
@@ -510,7 +524,11 @@ function showPoses(p){const key=JSON.stringify(p||{});if(key===posesShown)return
  document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{if(confirm('Delete pose '+b.dataset.del+'?'))get('/roarm/delete_pose?name='+b.dataset.del)})}
 $('play').onclick=()=>get('/roarm/play?from=continue');
 $('playstart').onclick=()=>{if(confirm('Run the whole pick sequence from the first pose?'))get('/roarm/play?from=start')};
-$('playstop').onclick=()=>get('/roarm/command?c=stop');
+$('playstop').onclick=()=>{
+ if(confirm('Stop the sequence? Press OK to ABORT and return to rest position, or Cancel to just pause.'))
+  get('/roarm/command?c=abort_to_rest');
+ else
+  get('/roarm/command?c=stop')};
 $('auto').onclick=()=>{if(confirm('Start AUTO? The next bottle seen is picked, then the RoArm goes back to rest.'))get('/roarm/play?from=auto')};
 function showPlay(d){const p=d.playing||{};$('play').disabled=$('playstart').disabled=$('auto').disabled=!!p.running;
  $('seq').textContent=d.sequence?('route: '+d.sequence.join(' > ')):'';
