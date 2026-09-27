@@ -14,6 +14,9 @@ Commands:
     python roarm_pick.py grab      RoArm grabs the bottle and lifts it
     python roarm_pick.py info      calibration summary
     python roarm_pick.py save-rest save where the RoArm is now as its rest pose (waits there for the vehicle)
+    python roarm_pick.py poses     list the saved poses (RoArm panel: "Save pose")
+    python roarm_pick.py save-pose NAME   save where the RoArm is now as pose NAME
+    python roarm_pick.py goto NAME        move to pose NAME by joint angles
     python roarm_pick.py rest      RoArm lifts straight up, then goes to its rest pose
     python roarm_pick.py --test    logic without hardware (fake RoArm and SO-101)
 
@@ -50,6 +53,7 @@ DEFAULTS = {
     "cal_step_mm": 70,            # calibration grid step around the centre
     "calibration": None,          # SO-101 image (look pose) -> RoArm x, y: python roarm_pick.py calibrate
     "rest": None,                 # joint angles where the RoArm waits for the vehicle: python roarm_pick.py save-rest
+    "poses": {},                  # named joint-angle poses (RoArm panel "Save pose" / save-pose NAME)
     # --- calibration (tag / brev) ---
     "brev_url": None, "brev_model": None,  # None = from Raspberry/config.json (key: $BREV_KEY or ~/.bashrc)
     "cal_center": [250, 0],       # x, y (mm): grid centre - in RoArm reach and in the SO-101 camera view
@@ -679,6 +683,25 @@ def go_rest(arm, cfg, timeout=20.0):
     raise TimeoutError(f"RoArm did not reach its rest pose (it is at {arm.where()})")
 
 
+def go_pose(arm, cfg, name, timeout=25.0):
+    """To saved pose `name` by joint angles (T:102): every joint straight to its angle; waits until there."""
+    pose = cfg["poses"][name]
+    arm.send({"T": 102, "base": pose["b"], "shoulder": pose["s"], "elbow": pose["e"], "wrist": pose["t"],
+              "roll": pose["r"], "hand": pose["g"], "spd": int(cfg["speed"] * 1000), "acc": 10})
+    if arm.mock:
+        return
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(0.3)
+        try:
+            w = arm.where()
+        except RuntimeError:
+            continue
+        if max(abs(w[k] - pose[k]) for k in "bset") < 0.08:
+            return
+    raise TimeoutError(f"RoArm did not reach pose '{name}' (it is at {arm.where()})")
+
+
 # ----------------------------------------------------------------------------- test without hardware
 def test():
     """Fake RoArm + fake camera: the table seen through the homography px -> mm = (u/2, v/2 + 100)."""
@@ -869,6 +892,20 @@ def main():
     elif cmd == ["rest"]:
         go_rest(arm, cfg)
         print("RoArm at its rest pose")
+    elif cmd == ["poses"]:
+        for name, v in (cfg.get("poses") or {}).items():
+            print(f"  {name:16s} b={v['b']:+.2f} s={v['s']:+.2f} e={v['e']:+.2f} t={v['t']:+.2f} r={v['r']:+.2f} "
+                  f"g={v['g']:.2f} | x={v['x']:.0f} y={v['y']:.0f} z={v['z']:.0f}")
+        print("" if cfg.get("poses") else "no poses saved")
+    elif cmd == ["save-pose"] and sys.argv[2:3]:
+        w = arm.where()
+        cfg.setdefault("poses", {})[sys.argv[2]] = {k: round(w[k], 4)
+                                                    for k in ("b", "s", "e", "t", "r", "g", "x", "y", "z", "tit")}
+        save_config(cfg)
+        print(f"pose '{sys.argv[2]}' saved")
+    elif cmd == ["goto"] and sys.argv[2:3] and sys.argv[2] in (cfg.get("poses") or {}):
+        go_pose(arm, cfg, sys.argv[2])
+        print(f"RoArm at pose '{sys.argv[2]}'")
     elif cmd == ["calibrate"] and sys.argv[2:3] == ["tag"]:  # like brev, but the tip from the AprilTag on the gripper
         w = arm.where()  # RoArm placed so the camera sees the tag: grid centre, tilt and roll from here
         if not any(w.get(k) for k in ("torswitchB", "torswitchS", "torswitchE")):  # motors off (moved by hand):
