@@ -394,17 +394,17 @@ details{margin-top:8px;font-size:13px;color:var(--dim)}#servos{display:grid;grid
 <span>gripper roll</span><button data-k="j5-">-</button><button data-k="j5+">+</button>
 <span>gripper</span><button data-k="j6-">-</button><button data-k="j6+">+</button></div>
 <h2>Move - like the SO-101 (hold, release = stop; the gripper keeps its angle like a crane hook)</h2><div class="grid">
-<button data-k="z+">UP<small>W</small></button><button data-k="reach+">OUT<small>R - away from base</small></button><button data-l="1">LEFT<small>A</small></button>
-<button data-k="z-">DOWN<small>S</small></button><button data-k="reach-">IN<small>F - toward base</small></button><button data-l="-1">RIGHT<small>D</small></button>
-<button data-k="t+">tilt gripper<small>J</small></button><button data-k="t-">tilt gripper<small>L</small></button><button id="stop">STOP<small>B</small></button>
-<button data-k="r+">roll gripper<small>U</small></button><button data-k="r-">roll gripper<small>O</small></button><span></span></div>
+<button data-k="z+">UP</button><button data-k="reach+">OUT<small>away from base</small></button><button data-l="1">LEFT</button>
+<button data-k="z-">DOWN</button><button data-k="reach-">IN<small>toward base</small></button><button data-l="-1">RIGHT</button>
+<button data-k="t+">tilt gripper</button><button data-k="t-">tilt gripper</button><button id="stop">STOP</button>
+<button data-k="r+">roll gripper</button><button data-k="r-">roll gripper</button><span></span></div>
 <h2>Gripper</h2><div class="grid">
-<button data-c="toggle">GRAB / RELEASE<small>SPACE</small></button><button data-c="lift" class="green">GRAB AND LIFT<small>P - 10 cm up</small></button><button data-c="open">open<small>Z</small></button></div>
+<button data-c="toggle">GRAB / RELEASE</button><button data-c="lift" class="green">GRAB AND LIFT<small>10 cm up</small></button><button data-c="open">open</button></div>
 <h2>Saved poses (joint angles)</h2><div class="grid" style="grid-template-columns:2fr 1fr">
 <input id="posename" placeholder="name, e.g. above_neck" style="font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:#0b0f14;color:var(--text)">
 <button id="savepose" class="green">Save pose</button></div>
 <div id="poses" style="margin-top:6px;font-size:13px;font-variant-numeric:tabular-nums"></div>
-<h2>Speed</h2><div class="grid"><button data-v="slow">1 slow<small>aiming</small></button><button data-v="normal" class="on">2 normal</button><button data-v="fast">3 fast</button></div>
+<h2>Speed</h2><div class="grid"><button data-v="slow">slow<small>aiming</small></button><button data-v="normal" class="on">normal</button><button data-v="fast">fast</button></div>
 </div></main><script>
 const $=id=>document.getElementById(id),get=u=>fetch(u).then(r=>r.json()).catch(()=>({}));
 let held=null,timer=null;
@@ -421,21 +421,9 @@ document.querySelectorAll('[data-k],[data-l]').forEach(b=>{const k=()=>b.dataset
 document.querySelectorAll('[data-c]').forEach(b=>b.onclick=()=>get('/roarm/command?c='+b.dataset.c));
 document.querySelectorAll('[data-v]').forEach(b=>b.onclick=()=>speed(b.dataset.v));
 $('stop').onclick=()=>{stop();get('/roarm/command?c=stop')};
-// keys like on the SO-101 (so101_station.py): W/S up/down, R/F out/in, A/D left/right, J/L tilt, U/O roll
-const KEYS={w:'z+',s:'z-',r:'reach+',f:'reach-',j:'t+',l:'t-',u:'r+',o:'r-'};
-const SPEED={'1':'slow','2':'normal','3':'fast'};
+// no keyboard shortcuts: typing a pose name must not move the arm - buttons only
 function speed(v){get('/roarm/speed?v='+v);document.querySelectorAll('[data-v]').forEach(x=>x.classList.toggle('on',x.dataset.v===v))}
-const keyDir=k=>k==='a'?left(1):k==='d'?left(-1):KEYS[k];
-onkeydown=e=>{const key=e.key.toLowerCase(),k=keyDir(key);
- if(k){move(k);e.preventDefault()}
- else if(key==='b'){stop();get('/roarm/command?c=stop')}
- else if(e.repeat){}
- else if(key===' '){get('/roarm/command?c=toggle');e.preventDefault()}
- else if(key==='p')get('/roarm/command?c=lift');
- else if(key==='z')get('/roarm/command?c=open');
- else if(key==='x')get('/roarm/command?c=close');
- else if(SPEED[key])speed(SPEED[key])};
-onkeyup=e=>{if(keyDir(e.key.toLowerCase())===held)stop()};onblur=stop;
+onblur=stop;
 function bar(el,v){const p=Math.min(100,Math.abs(v||0)/350*100);el.style.width=p+'%';el.style.background=p>80?'var(--bad)':p>55?'var(--warn)':'var(--ok)'}
 // gauge: bar up to "max", colour from the yellow/red thresholds, text next to it
 function gauge(id,v,max,yellow,red,text){const el=$('s-'+id),t=$('t-'+id);
