@@ -662,7 +662,7 @@ def grab(arm, so, cfg, pick, px=None, log=print):
 def go_rest(arm, cfg, timeout=20.0):
     """To the saved rest pose: first straight up by approach_mm (out of the basket), then joint angles (T:102).
     Joint angles, not x y z: the pose is reached exactly as it was saved, whichever elbow branch that was."""
-    rest = cfg["rest"]
+    rest = (cfg.get("poses") or {}).get("rest") or cfg["rest"]  # the panel's "rest" pose wins over save-rest
     if not rest:
         raise RuntimeError("no rest pose: place the RoArm and run python roarm_pick.py save-rest")
     w = arm.where()
