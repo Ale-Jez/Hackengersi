@@ -315,7 +315,7 @@ class RoArmPanel:
         roarm_pick.save_config(cfg)
 
     # ------------------------------------------------------------------ taught pick sequence
-    def start_play(self, restart, auto=False, route="bottle"):
+    def start_play(self, restart, auto=False, route="bottle", resume=False):
         """roarm_pick.play of `route` (auto: the demo loop) in a thread; its log goes to the page. False when already
         running."""
         if self.playing["running"]:
@@ -334,7 +334,8 @@ class RoArmPanel:
                 cfg = roarm_pick.load_config()
                 arm = roarm_pick.RoArm(cfg["roarm_ip"])
                 if auto:
-                    roarm_pick.auto(arm, roarm_pick.SO101(cfg["so101_url"]), cfg, log=log, stop=self._stop)
+                    roarm_pick.auto(arm, roarm_pick.SO101(cfg["so101_url"]), cfg, log=log, stop=self._stop,
+                                    resume=resume)  # Continue: on at the stopped route step, no new detection
                 else:
                     roarm_pick.play(arm, cfg, restart=restart, log=log, stop=self._stop, route=route)
             except roarm_pick.Stopped as e:
@@ -453,7 +454,8 @@ def handle(h, path, q):
         route = q.get("route", "bottle")
         if route not in roarm_pick.route_names(_config()):
             return h._json({"error": f"no route '{route}'"}, 404)
-        return h._json({"ok": p.start_play(q["from"] == "start", auto=q["from"] == "auto", route=route)})
+        return h._json({"ok": p.start_play(q["from"] == "start", auto=q["from"] == "auto", route=route,
+                                           resume=q.get("resume") == "1")})
     if path == "/roarm/command" and q.get("c") == "stop" and p.playing["running"]:
         p._stop.set()  # the pick sequence holds the arm where it is and stops
         return h._json({"ok": True})
@@ -499,7 +501,7 @@ details{margin-top:8px;font-size:13px;color:var(--dim)}#servos{display:grid;grid
 <div id="stopped" style="grid-column:1/4;display:none;grid-template-columns:1fr 1fr;gap:6px">
 <button id="continue" class="green">Continue<small>from the stopped step</small></button>
 <button id="abort" style="background:var(--warn);color:#000">Abort mission<small>RoArm to rest, SO-101 to M</small></button></div>
-<button id="auto" class="green" style="grid-column:1/4">AUTO: bottle seen -> 1 s -> SO-101 moves away -> RoArm picks it -> rest</button></div>
+<button id="auto" class="green" style="grid-column:1/4">AUTO: SO-101 show (2 s) -> SO-101 moves away -> RoArm picks the bottle, then the &#128020; chicken -> rest</button></div>
 <div id="seq" style="margin-top:6px;font-size:12px;color:var(--dim);white-space:pre-line"></div>
 <pre id="playlog" style="background:#05080b;border-radius:8px;padding:8px;height:150px;overflow:auto;font-size:12px;margin:8px 0 0;white-space:pre-wrap">(pick log)</pre>
 <h2>Saved poses (joint angles)</h2><div class="grid" style="grid-template-columns:1.6fr 1.3fr 1fr">
@@ -617,9 +619,9 @@ $('playstart').onclick=()=>{if(confirm('Run the whole pick sequence from the fir
 $('playstop').onclick=()=>get('/roarm/command?c=stop');
 let actedAt=0;const hideStopped=()=>{actedAt=Date.now();$('stopped').style.display='none'};
 let lastState={};  // Continue resumes what was stopped: AUTO again (its route resumes at the stopped step) or the pick
-$('continue').onclick=()=>{hideStopped();get('/roarm/play?from='+(lastState.stopped==='auto'?'auto':'continue&route='+(lastState.stopped||'bottle')))};
+$('continue').onclick=()=>{hideStopped();get('/roarm/play?from='+(lastState.stopped==='auto'?'auto&resume=1':'continue&route='+(lastState.stopped||'bottle')))};
 $('abort').onclick=()=>{if(confirm('Abort the whole mission?\\n\\nThe RoArm goes back to its rest pose, the SO-101 to its M pose, and the stopped progress is discarded (the next Play pick starts from the first pose).')){hideStopped();get('/roarm/abort')}};
-$('auto').onclick=()=>{if(confirm('Start AUTO? The next bottle seen is picked, then the RoArm goes back to rest.'))get('/roarm/play?from=auto')};
+$('auto').onclick=()=>{if(confirm('Start AUTO? The SO-101 does its show for 2 s and moves away, then the RoArm picks the bottle and right away the chicken, then goes back to rest.'))get('/roarm/play?from=auto')};
 function showPlay(d){lastState=d;const p=d.playing||{};$('chicken').disabled=$('playstart').disabled=$('auto').disabled=!!p.running;
  // Continue / Abort only after a Stop (or failure): gone while anything runs and right after one is clicked
  $('stopped').style.display=!p.running&&d.paused&&Date.now()-actedAt>2000?'grid':'none';
