@@ -17,6 +17,7 @@ Commands:
     python roarm_pick.py poses     list the saved poses (RoArm panel: "Save pose")
     python roarm_pick.py save-pose NAME   save where the RoArm is now as pose NAME
     python roarm_pick.py goto NAME        move to pose NAME by joint angles
+    python roarm_pick.py play [--restart] the saved poses in order; after a failure it continues at the failed step
     python roarm_pick.py rest      RoArm lifts straight up, then goes to its rest pose
     python roarm_pick.py --test    logic without hardware (fake RoArm and SO-101)
 
@@ -702,6 +703,71 @@ def go_pose(arm, cfg, name, timeout=25.0):
     raise TimeoutError(f"RoArm did not reach pose '{name}' (it is at {arm.where()})")
 
 
+PROGRESS_FILE = os.path.join(_dir, "pick_progress.json")  # which step of the sequence is next (survives a crash)
+
+
+def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool_wait_s=600.0):
+    """Taught pick: the saved poses one after another (cfg "sequence", else the order they were saved in).
+
+    Progress is written after every reached pose, so a failed run continues AT the failed step next time (or right
+    away: a timed-out move is retried `retries` times; overheat / RoArm not answering -> wait until it cools down /
+    answers again, then the same step). restart=True starts from the first pose. Returns True when all are done."""
+    progress_file = progress_file or PROGRESS_FILE
+    poses = cfg.get("poses") or {}
+    sequence = cfg.get("sequence") or list(poses)
+    missing = [n for n in sequence if n not in poses]
+    if not sequence or missing:
+        raise RuntimeError(f"sequence {sequence}: missing poses {missing}" if missing else "no poses saved")
+    step = 0
+    if not restart and os.path.exists(progress_file):
+        with open(progress_file, encoding="utf-8") as f:
+            saved = json.load(f)
+        if saved.get("sequence") == sequence and 0 <= saved.get("next", 0) < len(sequence):
+            step = saved["next"]
+            log(f"continuing from step {step + 1}/{len(sequence)} ({sequence[step]})")
+
+    def save(nxt):
+        with open(progress_file, "w", encoding="utf-8") as f:
+            json.dump({"sequence": sequence, "next": nxt, "t": time.time()}, f)
+
+    while step < len(sequence):
+        name = sequence[step]
+        save(step)  # a crash from here on resumes at this step
+        failures = 0
+        while True:
+            try:
+                log(f"step {step + 1}/{len(sequence)}: {name}")
+                go_pose(arm, cfg, name)
+                break
+            except TimeoutError as e:
+                failures += 1
+                if failures > retries:
+                    log(f"step {step + 1} ({name}) failed {failures}x - stopped; run play again to continue here")
+                    raise
+                log(f"  did not reach {name} ({e}) - retry {failures}/{retries}")
+            except Overheat as e:
+                log(f"  {e} - waiting for it to cool down, then {name} again")
+                deadline = time.monotonic() + cool_wait_s
+                while True:
+                    time.sleep(10)
+                    try:
+                        arm.check_temp(max_age=0)
+                        break
+                    except Overheat:
+                        if time.monotonic() > deadline:
+                            raise
+            except (RuntimeError, requests.RequestException) as e:  # RoArm not answering (power, USB bridge)
+                failures += 1
+                if failures > retries + 3:
+                    raise
+                log(f"  RoArm not answering ({e}) - waiting 5 s, then {name} again")
+                time.sleep(5)
+        step += 1
+    save(len(sequence))
+    log("sequence done")
+    return True
+
+
 # ----------------------------------------------------------------------------- test without hardware
 def test():
     """Fake RoArm + fake camera: the table seen through the homography px -> mm = (u/2, v/2 + 100)."""
@@ -808,6 +874,34 @@ def test():
         # jaws across a bottle lying along the RoArm x axis straight ahead: roll pi/2; along y: roll 0 (offset 0)
         assert abs(abs(jaw_roll(dict(DEFAULTS), 250, 0, 0.0)) - math.pi / 2) < 1e-9
         assert abs(jaw_roll(dict(DEFAULTS), 250, 0, math.pi / 2)) < 1e-9
+        # taught sequence: step 3 fails 3x -> stopped, progress says step 3; the next play continues there
+        import tempfile
+
+        prog = os.path.join(tempfile.mkdtemp(), "progress.json")
+        pcfg = dict(cfg, sequence=None, poses={n: {"b": i, "s": 0, "e": 1, "t": 0, "r": 0, "g": 3}
+                                               for i, n in enumerate(("rest", "aim", "grip", "lift"))})
+        reached, fail = [], {"grip": 3}
+        orig_go_pose = globals()["go_pose"]
+
+        def fake_go_pose(a, c, name, timeout=25.0):
+            if fail.get(name):
+                fail[name] -= 1
+                raise TimeoutError(name)
+            reached.append(name)
+        globals()["go_pose"] = fake_go_pose
+        try:
+            try:
+                play(arm2, pcfg, log=lambda *_: None, progress_file=prog)
+                raise AssertionError("step grip should have failed")
+            except TimeoutError:
+                pass
+            assert reached == ["rest", "aim"] and json.load(open(prog))["next"] == 2, reached
+            assert play(arm2, pcfg, log=lambda *_: None, progress_file=prog) and reached == ["rest", "aim", "grip", "lift"]
+            fail["aim"] = 1  # one timeout is retried on the spot
+            assert play(arm2, pcfg, log=lambda *_: None, progress_file=prog)
+            assert reached[-4:] == ["rest", "aim", "grip", "lift"], reached
+        finally:
+            globals()["go_pose"] = orig_go_pose
         # rest pose: lift first (world up), then the saved joint angles
         sent = []
         arm2.send = sent.append
@@ -903,6 +997,8 @@ def main():
                                                     for k in ("b", "s", "e", "t", "r", "g", "x", "y", "z", "tit")}
         save_config(cfg)
         print(f"pose '{sys.argv[2]}' saved")
+    elif cmd == ["play"]:
+        play(arm, cfg, restart="--restart" in sys.argv)
     elif cmd == ["goto"] and sys.argv[2:3] and sys.argv[2] in (cfg.get("poses") or {}):
         go_pose(arm, cfg, sys.argv[2])
         print(f"RoArm at pose '{sys.argv[2]}'")
