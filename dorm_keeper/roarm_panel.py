@@ -250,7 +250,7 @@ class RoArmPanel:
                         close = c == "close" or (c == "toggle" and self.g < (self.opened + self.closed) / 2)
                         self._gripper(close)
                     elif isinstance(c, tuple) and c[0] == "save_pose":
-                        self._save_pose(c[1])
+                        self._save_pose(c[1], c[2] if len(c) > 2 else None)
                     elif isinstance(c, tuple) and c[0] == "goto_pose":
                         self._goto_pose(c[1])
                     elif c == "lift" and not self.no_torque:  # P: grab and lift by 10 cm
@@ -278,15 +278,19 @@ class RoArmPanel:
                 time.sleep(1.0)
 
     # ------------------------------------------------------------------ saved poses (joint angles)
-    def _save_pose(self, name):
-        """Current joint angles (+ x y z for reference) -> roarm_calibration.json "poses"[name]."""
+    def _save_pose(self, name, route=None):
+        """Current joint angles (+ x y z for reference) -> roarm_calibration.json "poses"[name]. route: a NEW pose also
+        joins that route, just before its closing rest (overwriting an existing pose never changes a route)."""
         import roarm_pick
 
         d = self._where()
         cfg = roarm_pick.load_config()
+        new = name not in (cfg.get("poses") or {})
         cfg.setdefault("poses", {})[name] = {k: round(d[k], 4) for k in ("b", "s", "e", "t", "r", "g", "x", "y", "z", "tit")}
+        if new and route in roarm_pick.route_names(cfg):
+            roarm_pick.add_to_route(cfg, route, name)
         roarm_pick.save_config(cfg)
-        self.state["message"] = f"pose '{name}' saved"
+        self.state["message"] = f"pose '{name}' saved" + (f", added to the {route} route" if new and route else "")
 
     def _goto_pose(self, name):
         """To a saved pose by joint angles (T:102) - every joint straight to its angle, slowly; no x y z maths."""
@@ -311,8 +315,9 @@ class RoArmPanel:
         roarm_pick.save_config(cfg)
 
     # ------------------------------------------------------------------ taught pick sequence
-    def start_play(self, restart, auto=False):
-        """roarm_pick.play (auto: the demo loop) in a thread; its log goes to the page. False when already running."""
+    def start_play(self, restart, auto=False, route="bottle"):
+        """roarm_pick.play of `route` (auto: the demo loop) in a thread; its log goes to the page. False when already
+        running."""
         if self.playing["running"]:
             return False
         import roarm_pick
@@ -320,7 +325,7 @@ class RoArmPanel:
         self.dir = None
         self._stop.clear()
         self.stopped = None
-        self.playing = {"running": True, "log": ["--- " + ("AUTO: waiting for a bottle" if auto else "pick " + (
+        self.playing = {"running": True, "log": ["--- " + ("AUTO: waiting for a bottle" if auto else f"{route} route " + (
             "from the start" if restart else "(continue)")) + " ---"]}
         log = self._log
 
@@ -331,12 +336,12 @@ class RoArmPanel:
                 if auto:
                     roarm_pick.auto(arm, roarm_pick.SO101(cfg["so101_url"]), cfg, log=log, stop=self._stop)
                 else:
-                    roarm_pick.play(arm, cfg, restart=restart, log=log, stop=self._stop)
+                    roarm_pick.play(arm, cfg, restart=restart, log=log, stop=self._stop, route=route)
             except roarm_pick.Stopped as e:
-                self.stopped = "auto" if auto else "pick"
+                self.stopped = "auto" if auto else route
                 log(f"STOPPED: {e} - Continue resumes, Abort mission resets both arms")
-            except Exception as e:  # any failure: shown on the page, progress kept for Continue / Play pick
-                self.stopped = "auto" if auto else "pick"
+            except Exception as e:  # any failure: shown on the page, progress kept for Continue
+                self.stopped = "auto" if auto else route
                 log(f"ERROR: {e} - Continue resumes at the failed step, Abort mission resets both arms")
             finally:
                 self.playing["running"] = False
@@ -377,9 +382,11 @@ class RoArmPanel:
     def data(self):
         import roarm_pick
 
-        return dict(self.state, speed=self.speed, poses=_config().get("poses") or {}, playing=self.playing,
-                    sequence=roarm_pick.sequence_of(_config()), paused=bool(self.stopped) or roarm_pick.mission_paused(),
-                    stopped=self.stopped)
+        cfg = _config()
+        routes = {r: roarm_pick.sequence_of(cfg, r) for r in roarm_pick.route_names(cfg)}
+        stopped = self.stopped or roarm_pick.paused_route(cfg)  # "auto" or the stopped route (also after a restart)
+        return dict(self.state, speed=self.speed, poses=cfg.get("poses") or {}, playing=self.playing,
+                    sequence=routes["bottle"], routes=routes, paused=bool(stopped), stopped=stopped)
 
 
 _panel = None
@@ -435,13 +442,18 @@ def handle(h, path, q):
         return h._json({"ok": True})
     if path in ("/roarm/save_pose", "/roarm/goto_pose") and POSE_NAME.match(q.get("name", "")):
         with p._lock:
-            p.commands.append((path[7:], q["name"]))
+            p.commands.append((path[7:], q["name"], q.get("route") or None))
         return h._json({"ok": True})
     if path == "/roarm/delete_pose" and POSE_NAME.match(q.get("name", "")):
         p.delete_pose(q["name"])
         return h._json({"ok": True})
     if path == "/roarm/play" and q.get("from") in ("continue", "start", "auto"):
-        return h._json({"ok": p.start_play(q["from"] == "start", auto=q["from"] == "auto")})
+        import roarm_pick
+
+        route = q.get("route", "bottle")
+        if route not in roarm_pick.route_names(_config()):
+            return h._json({"error": f"no route '{route}'"}, 404)
+        return h._json({"ok": p.start_play(q["from"] == "start", auto=q["from"] == "auto", route=route)})
     if path == "/roarm/command" and q.get("c") == "stop" and p.playing["running"]:
         p._stop.set()  # the pick sequence holds the arm where it is and stops
         return h._json({"ok": True})
@@ -482,16 +494,17 @@ details{margin-top:8px;font-size:13px;color:var(--dim)}#servos{display:grid;grid
 <img src="/preview?clean=1&fps=8" alt="SO-101 camera"><div id="msg">connecting...</div></div>
 <div class="card" style="margin-top:14px">
 <h2>Pick sequence</h2><div class="grid">
-<button id="play" class="green">Play pick<small>continues after a failure</small></button>
-<button id="playstart">Play from start</button><button id="playstop" style="background:var(--bad)">Stop</button>
+<button id="chicken" class="green">&#128020; Pick the chicken<small>chicken route from the start</small></button>
+<button id="playstart">Play from start<small>bottle route</small></button><button id="playstop" style="background:var(--bad)">Stop</button>
 <div id="stopped" style="grid-column:1/4;display:none;grid-template-columns:1fr 1fr;gap:6px">
 <button id="continue" class="green">Continue<small>from the stopped step</small></button>
 <button id="abort" style="background:var(--warn);color:#000">Abort mission<small>RoArm to rest, SO-101 to M</small></button></div>
 <button id="auto" class="green" style="grid-column:1/4">AUTO: bottle seen -> 1 s -> SO-101 moves away -> RoArm picks it -> rest</button></div>
-<div id="seq" style="margin-top:6px;font-size:12px;color:var(--dim)"></div>
+<div id="seq" style="margin-top:6px;font-size:12px;color:var(--dim);white-space:pre-line"></div>
 <pre id="playlog" style="background:#05080b;border-radius:8px;padding:8px;height:150px;overflow:auto;font-size:12px;margin:8px 0 0;white-space:pre-wrap">(pick log)</pre>
-<h2>Saved poses (joint angles)</h2><div class="grid" style="grid-template-columns:2fr 1fr">
+<h2>Saved poses (joint angles)</h2><div class="grid" style="grid-template-columns:1.6fr 1.3fr 1fr">
 <input id="posename" placeholder="name, e.g. above_neck" style="font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:#0b0f14;color:var(--text)">
+<select id="saveroute" title="a new pose joins this route, just before its closing rest" style="font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:#0b0f14;color:var(--text)"><option value="">add to: no route</option></select>
 <button id="savepose" class="green">Save pose</button></div>
 <div id="poses" style="margin-top:6px;font-size:13px;font-variant-numeric:tabular-nums"></div></div></div>
 <div class="card">
@@ -564,36 +577,55 @@ async function refreshSystem(){const s=await get('/system'),w=[];
  const all=[];if(s.so101&&s.so101.temp)for(const[k,v]of Object.entries(s.so101.temp))all.push(`<span>SO-101 ${k}: ${v} C${s.so101.voltage&&s.so101.voltage[k]?' / '+s.so101.voltage[k].toFixed(1)+' V':''}</span>`);
  if(roarm.servo_temps)for(const[k,v]of Object.entries(roarm.servo_temps))all.push(`<span>RoArm ${k}: ${v} C</span>`);
  $('servos').innerHTML=all.join('')||'no data';setTimeout(refreshSystem,1000)}refreshSystem();
+// editing a pose: "edit" picks it from any folder (the RoArm goes there), adjust it, Save pose overwrites it
+let editing=null;
+function markEditing(){const n=$('posename').value.trim(),known=!!(lastState.poses||{})[n];editing=known?n:null;
+ $('savepose').innerHTML=known?'Save changes<small>overwrite '+n+'</small>':'Save pose';
+ document.querySelectorAll('#poses [data-row]').forEach(r=>r.style.outline=r.dataset.row===editing?'2px solid var(--accent)':'')}
+$('posename').oninput=markEditing;
 $('savepose').onclick=()=>{const n=$('posename').value.trim();if(!/^[A-Za-z0-9_-]{1,32}$/.test(n)){alert('Name: letters, digits, _ or - (max 32)');return}
- get('/roarm/save_pose?name='+n)};
+ if((lastState.poses||{})[n]&&!confirm('Overwrite pose '+n+' with where the RoArm is now?'))return;
+ get('/roarm/save_pose?name='+n+'&route='+encodeURIComponent($('saveroute').value))};
+// route picker next to Save pose: a NEW pose goes into that route just before its closing rest; the choice is remembered
+let routeChoice='';try{routeChoice=localStorage.getItem('roarm_saveroute')||''}catch(e){}
+$('saveroute').onchange=()=>{routeChoice=$('saveroute').value;try{localStorage.setItem('roarm_saveroute',routeChoice)}catch(e){}};
+function showRoutePicker(routes){const names=Object.keys(routes||{}),key=names.join();if($('saveroute').dataset.k===key)return;
+ $('saveroute').dataset.k=key;$('saveroute').innerHTML='<option value="">add to: no route</option>'+names.map(r=>`<option value="${r}">add to: ${ROUTE_ICON[r]||''} ${r} route</option>`).join('');
+ $('saveroute').value=names.includes(routeChoice)?routeChoice:''}
 let posesShown='';const closed=new Set();  // folders the user folded stay folded when the list is redrawn
-function poseRow(n,v,step){return `<div style="display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:center;margin:4px 0">
+function poseRow(n,v,step){return `<div data-row="${n}" style="display:grid;grid-template-columns:1fr auto auto auto;gap:6px;align-items:center;margin:4px 0;border-radius:8px;padding:2px">
  <span>${step?`<small style="color:var(--dim)">${step}.</small> `:''}<b>${n}</b><br>${v?`<small style="color:var(--dim)">b ${v.b.toFixed(2)} s ${v.s.toFixed(2)} e ${v.e.toFixed(2)} t ${v.t.toFixed(2)} r ${v.r.toFixed(2)} g ${v.g.toFixed(2)}</small>`:'<small style="color:var(--bad)">not saved</small>'}</span>
- <button data-go="${n}">go</button><button data-del="${n}">del</button></div>`}
-function folder(id,title,rows){return `<details data-f="${id}"${closed.has(id)?'':' open'} style="border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin:6px 0">
- <summary style="cursor:pointer;font-weight:700">&#128193; ${title}</summary>${rows}</details>`}
-function showPoses(p,seq){p=p||{};seq=seq||[];const key=JSON.stringify([p,seq]);if(key===posesShown)return;posesShown=key;
- const other=Object.keys(p).filter(n=>!seq.includes(n));  // one folder per path (now: the pick route) + the rest
- $('poses').innerHTML=(seq.length?folder('route',`pick route <small style="color:var(--dim)">${seq.length} steps</small>`,seq.map((n,i)=>poseRow(n,p[n],i+1)).join('')):'')
+ <button data-go="${n}">go</button><button data-edit="${n}">edit</button><button data-del="${n}">del</button></div>`}
+function folder(id,title,rows,icon){return `<details data-f="${id}"${closed.has(id)?'':' open'} style="border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin:6px 0">
+ <summary style="cursor:pointer;font-weight:700">${icon||'&#128193;'} ${title}</summary>${rows}</details>`}
+const ROUTE_ICON={bottle:'&#127870;',chicken:'&#128020;'};  // one folder per route: the bottle, the chicken, ...
+function showPoses(p,routes){p=p||{};routes=routes||{};const key=JSON.stringify([p,routes]);if(key===posesShown)return;posesShown=key;
+ const used=new Set(Object.values(routes).flat()),other=Object.keys(p).filter(n=>!used.has(n));
+ $('poses').innerHTML=Object.entries(routes).filter(([r,seq])=>seq.length).map(([r,seq])=>folder('route-'+r,
+   `${r} route <small style="color:var(--dim)">${seq.length} steps</small>`,seq.map((n,i)=>poseRow(n,p[n],i+1)).join(''),ROUTE_ICON[r])).join('')
   +(other.length?folder('other',`other poses <small style="color:var(--dim)">${other.length}, not in a route</small>`,other.map(n=>poseRow(n,p[n])).join('')):'')
   ||'<small style="color:var(--dim)">none yet</small>';
  document.querySelectorAll('#poses details').forEach(d=>d.ontoggle=()=>d.open?closed.delete(d.dataset.f):closed.add(d.dataset.f));
  document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>{if(confirm('Move the RoArm to pose '+b.dataset.go+'?'))get('/roarm/goto_pose?name='+b.dataset.go)});
- document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{if(confirm('Delete pose '+b.dataset.del+'?'))get('/roarm/delete_pose?name='+b.dataset.del)})}
-$('play').onclick=()=>get('/roarm/play?from=continue');
+ document.querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{const n=b.dataset.edit;
+  if(!confirm('Edit pose '+n+'?\\n\\nThe RoArm moves to it. Adjust it with the controls, then press Save changes to overwrite '+n+'.'))return;
+  $('posename').value=n;get('/roarm/goto_pose?name='+n);markEditing();$('posename').scrollIntoView({block:'center'})});
+ document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{if(confirm('Delete pose '+b.dataset.del+'?'))get('/roarm/delete_pose?name='+b.dataset.del)});
+ markEditing()}
+$('chicken').onclick=()=>{if(confirm('Pick the chicken? The RoArm plays the chicken route from its first pose.'))get('/roarm/play?from=start&route=chicken')};
 $('playstart').onclick=()=>{if(confirm('Run the whole pick sequence from the first pose?'))get('/roarm/play?from=start')};
 $('playstop').onclick=()=>get('/roarm/command?c=stop');
 let actedAt=0;const hideStopped=()=>{actedAt=Date.now();$('stopped').style.display='none'};
 let lastState={};  // Continue resumes what was stopped: AUTO again (its route resumes at the stopped step) or the pick
-$('continue').onclick=()=>{hideStopped();get('/roarm/play?from='+(lastState.stopped==='auto'?'auto':'continue'))};
+$('continue').onclick=()=>{hideStopped();get('/roarm/play?from='+(lastState.stopped==='auto'?'auto':'continue&route='+(lastState.stopped||'bottle')))};
 $('abort').onclick=()=>{if(confirm('Abort the whole mission?\\n\\nThe RoArm goes back to its rest pose, the SO-101 to its M pose, and the stopped progress is discarded (the next Play pick starts from the first pose).')){hideStopped();get('/roarm/abort')}};
 $('auto').onclick=()=>{if(confirm('Start AUTO? The next bottle seen is picked, then the RoArm goes back to rest.'))get('/roarm/play?from=auto')};
-function showPlay(d){lastState=d;const p=d.playing||{};$('play').disabled=$('playstart').disabled=$('auto').disabled=!!p.running;
+function showPlay(d){lastState=d;const p=d.playing||{};$('chicken').disabled=$('playstart').disabled=$('auto').disabled=!!p.running;
  // Continue / Abort only after a Stop (or failure): gone while anything runs and right after one is clicked
  $('stopped').style.display=!p.running&&d.paused&&Date.now()-actedAt>2000?'grid':'none';
- $('seq').textContent=d.sequence?('route: '+d.sequence.join(' > ')):'';
+ $('seq').textContent=Object.entries(d.routes||{}).map(([r,seq])=>r+' route: '+seq.join(' > ')).join('\\n');
  if(p.log&&p.log.length){const l=$('playlog'),t=p.log.join('\\n');if(l.textContent!==t){l.textContent=t;l.scrollTop=l.scrollHeight}}}
-async function refresh(){const d=await get('/roarm/state');showPoses(d.poses,d.sequence);showPlay(d);if(d.x!==undefined){$('px').textContent=Math.round(Math.hypot(d.x,d.y))+' mm';$('py').textContent=Math.round(Math.atan2(d.y,d.x)*180/Math.PI)+' deg';$('pz').textContent=Math.round(d.z)+' mm'}
+async function refresh(){const d=await get('/roarm/state');showPlay(d);showPoses(d.poses,d.routes);showRoutePicker(d.routes);if(d.x!==undefined){$('px').textContent=Math.round(Math.hypot(d.x,d.y))+' mm';$('py').textContent=Math.round(Math.atan2(d.y,d.x)*180/Math.PI)+' deg';$('pz').textContent=Math.round(d.z)+' mm'}
  roarm=d;bar($('lshoulder'),d.shoulder_load);bar($('lelbow'),d.elbow_load);
  $('t-shoulder').textContent=d.shoulder_load!=null?Math.abs(d.shoulder_load):'-';$('t-elbow').textContent=d.elbow_load!=null?Math.abs(d.elbow_load):'-';
  $('msg').textContent=d.message||'';$('msg').className=(!d.connected||/OVERLOAD/.test(d.message||''))?'bad':'';

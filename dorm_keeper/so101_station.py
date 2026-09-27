@@ -1029,6 +1029,7 @@ def run_task(arm, function, name):
             result = function(arm)
         except SO101Error as e:
             result = {"error": str(e)}
+            print(f"{name}: FAILED - {e}", flush=True)  # AUTO's moves (M / away) must not fail silently
         if name == "scan":
             state["result"] = result
             print("RESULT:", result)
@@ -2965,6 +2966,7 @@ def camera_mode(port=None, mock=False):
     detector = BottleDetector()
     reader = CodeReader()
     codes, target_since, prev_target = [], 0.0, None
+    pending_move = None  # "h" / "gopose:NAME" that came while the arm was busy - done when it is free
     tracking = TRACK and "--no-tracking" not in sys.argv  # --no-tracking: the arm moves only from keys
     loop_t = time.time()
     srv = http_server(arm)
@@ -3174,17 +3176,22 @@ def camera_mode(port=None, mock=False):
                         pass
                 show(f"tracking {'ON' if tracking else 'OFF'}")
             inputs += [c for c in read_keys() if c == "\r"]  # Enter from the terminal too
+            if pending_move and not _busy.is_set():  # a pose asked for while the arm was busy: now
+                inputs.insert(0, pending_move)
+                pending_move = None
             for c in inputs:
                 if c in ("q", "\x1b"):
                     raise KeyboardInterrupt
                 if c == "\r":
                     run_task(arm, inspect_can, "scan") or show("arm busy")
                 elif _busy.is_set():
+                    if c == "h" or c.startswith("gopose:"):  # AUTO's "SO-101 away" / "to M": do it right after
+                        pending_move = c
                     continue
                 elif c == "h":
                     run_task(arm, go_home, "home") or show("arm busy")
                 elif c.startswith("gopose:"):
-                    run_task(arm, lambda a, n=c[7:]: go_saved_pose(a, n), "home") or show("arm busy")
+                    run_task(arm, lambda a, n=c[7:]: go_saved_pose(a, n), "pose " + c[7:]) or show("arm busy")
                 elif c.startswith("savepose:"):
                     show(save_pose(arm, c[9:]))
                 elif c == "g":  # G: follow the (grey) basket <-> bottles
