@@ -18,6 +18,7 @@ Commands:
     python roarm_pick.py save-pose NAME   save where the RoArm is now as pose NAME
     python roarm_pick.py goto NAME        move to pose NAME by joint angles
     python roarm_pick.py play [--restart] the saved poses in order; after a failure it continues at the failed step
+    python roarm_pick.py auto [--loop]  SO-101 to M, bottle seen -> 1 s -> SO-101 away + RoArm sequence -> rest, end
     python roarm_pick.py rest      RoArm lifts straight up, then goes to its rest pose
     python roarm_pick.py --test    logic without hardware (fake RoArm and SO-101)
 
@@ -55,6 +56,11 @@ DEFAULTS = {
     "calibration": None,          # SO-101 image (look pose) -> RoArm x, y: python roarm_pick.py calibrate
     "rest": None,                 # joint angles where the RoArm waits for the vehicle: python roarm_pick.py save-rest
     "poses": {},                  # named joint-angle poses (RoArm panel "Save pose" / save-pose NAME)
+    # --- auto: SO-101 sees a bottle -> it moves aside ("away" pose) -> the RoArm plays the sequence -> back ---
+    "detect_conf": 0.4,           # one YOLO detection of a bottle with at least this confidence starts a pick
+    "detect_s": 1.0,              # wait this long (s) after the detection, then the RoArm starts
+    "so101_away_pose": "away",    # SO-101 pose (its panel: "Save as AWAY pose"); missing = the SO-101 stays
+    "after_pick_s": 3.0,          # pause after a pick before watching for the next bottle
     # --- calibration (tag / brev) ---
     "brev_url": None, "brev_model": None,  # None = from Raspberry/config.json (key: $BREV_KEY or ~/.bashrc)
     "cal_center": [250, 0],       # x, y (mm): grid centre - in RoArm reach and in the SO-101 camera view
@@ -216,8 +222,10 @@ class SO101:
     def tracking(self, on):
         self._get("/tracking", on=int(bool(on)))
 
-    def look(self):
-        answer = self._get("/look")
+    def look(self, force=False):
+        """SO-101 back to its look pose (key M). force: also from far away (e.g. its "away" pose) - the station
+        otherwise refuses a big lift/elbow move as a possibly stale pose."""
+        answer = self._get("/look", **({"force": 1} if force else {}))
         if answer.get("error"):
             raise RuntimeError(answer["error"])
 
@@ -232,6 +240,10 @@ class SO101:
         r.raise_for_status()
         h, w = cv2.imdecode(np.frombuffer(r.content, np.uint8), cv2.IMREAD_GRAYSCALE).shape
         return r.content, w, h
+
+    def pose(self, name):
+        """SO-101 to its saved pose `name` (e.g. "away")."""
+        self._get("/so101_pose", name=name)
 
     def status(self, text):
         """RoArm status line in the /demo view (network errors do not matter)."""
@@ -267,10 +279,12 @@ def to_table(cal, u, v):
     return (H[0][0] * u + H[0][1] * v + H[0][2]) / w, (H[1][0] * u + H[1][1] * v + H[1][2]) / w
 
 
-def wait_for_look(so, timeout=40.0):
+def wait_for_look(so, timeout=40.0, stop=None):
     """SO-101 in its look pose and still (only then is the image a map of the table)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        if stop is not None and stop.is_set():
+            raise Stopped("stopped while the SO-101 went to its look pose")
         w = so.bottles()
         if w.get("at_look") and w.get("still"):
             return w
@@ -690,13 +704,23 @@ class Stopped(Exception):
 
 def go_pose(arm, cfg, name, timeout=25.0, stop=None):
     """To saved pose `name` by joint angles (T:102): every joint straight to its angle; waits until there.
+
+    Gripper: T:102 moves it at the slow joint speed (2.76 -> 1.08 took ~5 s), and "reached" only looked at the arm
+    joints - so a release-only step ("thrown-away") ended at once and the next pose closed the jaws again before the
+    bottle fell out. Now a gripper change also goes as T:106 at full speed, and the step waits until the jaws are there
+    or stopped (closed on a bottle); after opening it holds release_s so the bottle drops.
     stop = threading.Event: when set, the arm holds where it is and Stopped is raised."""
     pose = cfg["poses"][name]
+    start_g = None if arm.mock else position(arm).get("g")
     arm.send({"T": 102, "base": pose["b"], "shoulder": pose["s"], "elbow": pose["e"], "wrist": pose["t"],
               "roll": pose["r"], "hand": pose["g"], "spd": int(cfg["speed"] * 1000), "acc": 10})
+    grip_moves = start_g is not None and abs(pose["g"] - start_g) > 0.15
+    if grip_moves:
+        arm.send({"T": 106, "cmd": round(pose["g"], 3), "spd": 0, "acc": 0})  # gripper alone, full speed
     if arm.mock:
         return
     deadline = time.monotonic() + timeout
+    g_prev, g_still_since = None, None
     while time.monotonic() < deadline:
         time.sleep(0.3)
         try:
@@ -706,7 +730,18 @@ def go_pose(arm, cfg, name, timeout=25.0, stop=None):
         if stop is not None and stop.is_set():
             hold_here(arm, w)
             raise Stopped(f"stopped on the way to '{name}'")
-        if max(abs(w[k] - pose[k]) for k in "bset") < 0.08:
+        g = w.get("g", pose["g"])
+        if g_prev is not None and abs(g - g_prev) < 0.02:
+            g_still_since = g_still_since or time.monotonic()
+        else:
+            g_still_since = None
+        g_prev = g
+        # the jaws are there, or have stopped (closed on the bottle neck / at their limit) for 0.6 s
+        grip_done = not grip_moves or abs(g - pose["g"]) < 0.1 or (
+            g_still_since is not None and time.monotonic() - g_still_since > 0.6)
+        if max(abs(w[k] - pose[k]) for k in "bset") < 0.08 and grip_done:
+            if grip_moves and pose["g"] < start_g:  # opened: give the bottle time to fall before moving on
+                time.sleep(cfg.get("release_s", 0.5))
             return
     raise TimeoutError(f"RoArm did not reach pose '{name}' (it is at {arm.where()})")
 
@@ -793,6 +828,53 @@ def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool
     save(len(sequence))
     log("sequence done")
     return True
+
+
+def wait_for_bottle(so, stop=None, min_conf=0.7, poll=0.1):
+    """Until YOLO sees a bottle with confidence >= min_conf - once is enough. Returns that detection."""
+    while True:
+        if stop is not None and stop.is_set():
+            raise Stopped("stopped while waiting for a bottle")
+        best = max((b for b in so.bottles().get("bottles", []) if b["cls"] == "bottle"),
+                   key=lambda b: b["conf"], default=None)
+        if best and best["conf"] >= min_conf:
+            return best
+        time.sleep(poll)
+
+
+def auto(arm, so, cfg, log=print, stop=None, cycles=1, progress_file=None):
+    """Demo loop: 1. the SO-101 goes to its saved look pose (key M), tracking off; 2. it detects a bottle;
+    3. after detect_s the RoArm starts the taught sequence AND the SO-101 moves to its "away" pose at the same time;
+    4. the sequence ends with the RoArm at rest - and AUTO ends (one bottle per press; cycles=None = loop, with the
+    SO-101 back at M and after_pick_s between picks). The sequence resumes at a failed step."""
+    done = 0
+    while cycles is None or done < cycles:
+        so.tracking(False)  # the camera must not follow the bottle into the RoArm's path
+        so.look(force=True)  # M pose - also when it comes from "away" (far from M)
+        wait_for_look(so, stop=stop)
+        so.status("waiting for a bottle")
+        log("SO-101 at M - waiting for a bottle...")
+        seen = wait_for_bottle(so, stop, cfg["detect_conf"])
+        log(f"bottle detected ({seen['conf']:.0%}) - RoArm starts in {cfg['detect_s']:.0f} s")
+        so.status("bottle detected")
+        deadline = time.monotonic() + cfg["detect_s"]
+        while time.monotonic() < deadline:
+            if stop is not None and stop.is_set():
+                raise Stopped("stopped before the pick")
+            time.sleep(0.05)
+        away = cfg.get("so101_away_pose")
+        if away:  # the SO-101 moves aside while the RoArm already starts (the station moves it in its own thread)
+            so.pose(away)
+            log(f"SO-101 -> {away}")
+        so.status("picking")
+        play(arm, cfg, log=log, stop=stop, progress_file=progress_file)
+        done += 1
+        log(f"pick {done} done - RoArm at rest")
+        so.status(f"pick {done} done")
+        if cycles is not None and done >= cycles:
+            break
+        time.sleep(cfg["after_pick_s"])
+    return done
 
 
 # ----------------------------------------------------------------------------- test without hardware
@@ -930,6 +1012,32 @@ def test():
             assert reached[-5:] == ["rest", "aim", "grip", "lift", "rest"], reached
         finally:
             globals()["go_pose"] = orig_go_pose
+        # auto: a bottle appears -> SO-101 "away" -> sequence -> SO-101 back to look
+        class AutoSO(FakeSO):
+            def __init__(self):
+                super().__init__()
+                self.calls, self.seen_n = [], 0
+
+            def look(self, force=False):
+                self.calls.append("look")
+
+            def pose(self, name):
+                self.calls.append("pose:" + name)
+
+            def bottles(self):
+                self.seen_n += 1  # nothing for 3 polls, then a bottle
+                b = [{"cls": "bottle", "conf": 0.9, "cx": 1, "cy": 1, "box": [0, 0, 2, 2]}] if self.seen_n > 3 else []
+                return {"width": 1920, "height": 1080, "at_look": True, "still": True, "joints": {}, "bottles": b}
+        globals()["go_pose"] = fake_go_pose
+        try:
+            reached.clear()
+            aso = AutoSO()
+            n = auto(arm2, aso, dict(pcfg, detect_s=0.2, after_pick_s=0), log=lambda *_: None, cycles=1,
+                     progress_file=os.path.join(tempfile.mkdtemp(), "p.json"))
+            assert n == 1 and aso.calls == ["look", "pose:away"], aso.calls  # one bottle, then AUTO ends
+            assert reached == ["rest", "aim", "grip", "lift", "rest"] and aso.tracks is False, reached
+        finally:
+            globals()["go_pose"] = orig_go_pose
         # rest pose: lift first (world up), then the saved joint angles
         sent = []
         arm2.send = sent.append
@@ -1025,6 +1133,8 @@ def main():
                                                     for k in ("b", "s", "e", "t", "r", "g", "x", "y", "z", "tit")}
         save_config(cfg)
         print(f"pose '{sys.argv[2]}' saved")
+    elif cmd == ["auto"]:  # one bottle: wait, pick, RoArm back to rest; --loop = until Ctrl+C
+        auto(arm, so, cfg, cycles=None if "--loop" in sys.argv else 1)
     elif cmd == ["play"]:
         play(arm, cfg, restart="--restart" in sys.argv)
     elif cmd == ["goto"] and sys.argv[2:3] and sys.argv[2] in (cfg.get("poses") or {}):

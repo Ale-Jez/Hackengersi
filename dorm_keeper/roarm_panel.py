@@ -310,15 +310,16 @@ class RoArmPanel:
         roarm_pick.save_config(cfg)
 
     # ------------------------------------------------------------------ taught pick sequence
-    def start_play(self, restart):
-        """roarm_pick.play in a thread; its log goes to the page. False when a pick is already running."""
+    def start_play(self, restart, auto=False):
+        """roarm_pick.play (auto: the demo loop) in a thread; its log goes to the page. False when already running."""
         if self.playing["running"]:
             return False
         import roarm_pick
 
         self.dir = None
         self._stop.clear()
-        self.playing = {"running": True, "log": ["--- pick " + ("from the start" if restart else "(continue)") + " ---"]}
+        self.playing = {"running": True, "log": ["--- " + ("AUTO: waiting for a bottle" if auto else "pick " + (
+            "from the start" if restart else "(continue)")) + " ---"]}
 
         def log(text):
             self.playing["log"] = (self.playing["log"] + [text])[-60:]
@@ -327,7 +328,11 @@ class RoArmPanel:
         def run():
             try:
                 cfg = roarm_pick.load_config()
-                roarm_pick.play(roarm_pick.RoArm(cfg["roarm_ip"]), cfg, restart=restart, log=log, stop=self._stop)
+                arm = roarm_pick.RoArm(cfg["roarm_ip"])
+                if auto:
+                    roarm_pick.auto(arm, roarm_pick.SO101(cfg["so101_url"]), cfg, log=log, stop=self._stop)
+                else:
+                    roarm_pick.play(arm, cfg, restart=restart, log=log, stop=self._stop)
             except roarm_pick.Stopped as e:
                 log(f"STOPPED: {e} - Play pick continues from here")
             except Exception as e:  # any failure: shown on the page, progress kept for the next Play pick
@@ -376,8 +381,8 @@ def handle(h, path, q):
     if path == "/roarm/delete_pose" and POSE_NAME.match(q.get("name", "")):
         p.delete_pose(q["name"])
         return h._json({"ok": True})
-    if path == "/roarm/play" and q.get("from") in ("continue", "start"):
-        return h._json({"ok": p.start_play(q["from"] == "start")})
+    if path == "/roarm/play" and q.get("from") in ("continue", "start", "auto"):
+        return h._json({"ok": p.start_play(q["from"] == "start", auto=q["from"] == "auto")})
     if path == "/roarm/command" and q.get("c") == "stop" and p.playing["running"]:
         p._stop.set()  # the pick sequence holds the arm where it is and stops
         return h._json({"ok": True})
@@ -443,7 +448,8 @@ details{margin-top:8px;font-size:13px;color:var(--dim)}#servos{display:grid;grid
 <button data-c="toggle">GRAB / RELEASE</button><button data-c="lift" class="green">GRAB AND LIFT<small>10 cm up</small></button><button data-c="open">open</button></div>
 <h2>Pick sequence</h2><div class="grid">
 <button id="play" class="green">Play pick<small>continues after a failure</small></button>
-<button id="playstart">Play from start</button><button id="playstop" style="background:var(--bad)">Stop</button></div>
+<button id="playstart">Play from start</button><button id="playstop" style="background:var(--bad)">Stop</button>
+<button id="auto" class="green" style="grid-column:1/4">AUTO: bottle seen -> 1 s -> SO-101 moves away -> RoArm picks it -> rest</button></div>
 <div id="seq" style="margin-top:6px;font-size:12px;color:var(--dim)"></div>
 <pre id="playlog" style="background:#05080b;border-radius:8px;padding:8px;height:150px;overflow:auto;font-size:12px;margin:8px 0 0;white-space:pre-wrap">(pick log)</pre>
 <h2>Saved poses (joint angles)</h2><div class="grid" style="grid-template-columns:2fr 1fr">
@@ -505,9 +511,10 @@ function showPoses(p){const key=JSON.stringify(p||{});if(key===posesShown)return
 $('play').onclick=()=>get('/roarm/play?from=continue');
 $('playstart').onclick=()=>{if(confirm('Run the whole pick sequence from the first pose?'))get('/roarm/play?from=start')};
 $('playstop').onclick=()=>get('/roarm/command?c=stop');
-function showPlay(d){const p=d.playing||{};$('play').disabled=$('playstart').disabled=!!p.running;
+$('auto').onclick=()=>{if(confirm('Start AUTO? The next bottle seen is picked, then the RoArm goes back to rest.'))get('/roarm/play?from=auto')};
+function showPlay(d){const p=d.playing||{};$('play').disabled=$('playstart').disabled=$('auto').disabled=!!p.running;
  $('seq').textContent=d.sequence?('route: '+d.sequence.join(' > ')):'';
- if(p.log&&p.log.length){const l=$('playlog'),t=p.log.join('\n');if(l.textContent!==t){l.textContent=t;l.scrollTop=l.scrollHeight}}}
+ if(p.log&&p.log.length){const l=$('playlog'),t=p.log.join('\\n');if(l.textContent!==t){l.textContent=t;l.scrollTop=l.scrollHeight}}}
 async function refresh(){const d=await get('/roarm/state');showPoses(d.poses);showPlay(d);if(d.x!==undefined){$('px').textContent=Math.round(Math.hypot(d.x,d.y))+' mm';$('py').textContent=Math.round(Math.atan2(d.y,d.x)*180/Math.PI)+' deg';$('pz').textContent=Math.round(d.z)+' mm'}
  roarm=d;bar($('lshoulder'),d.shoulder_load);bar($('lelbow'),d.elbow_load);
  $('t-shoulder').textContent=d.shoulder_load!=null?Math.abs(d.shoulder_load):'-';$('t-elbow').textContent=d.elbow_load!=null?Math.abs(d.elbow_load):'-';

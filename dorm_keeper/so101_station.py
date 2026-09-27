@@ -32,6 +32,7 @@ import json
 import math
 import os
 import queue
+import re
 import socket
 import sys
 import threading
@@ -747,6 +748,14 @@ def go_home(arm):
     arm.move_slow(target={j: poses[HOME_POSE][j] for j in MOVE_JOINTS}, verbose=False)
 
 
+def go_saved_pose(arm, name):
+    """To a pose saved in poses_so101.json (e.g. "away": out of the RoArm's way while it picks)."""
+    poses = load_json(POSES_FILE, {})
+    if name not in poses:
+        raise SO101Error(f"no SO-101 pose '{name}' - position the arm and save it in the panel")
+    arm.move_slow(target={j: poses[name][j] for j in MOVE_JOINTS}, verbose=False)
+
+
 def save_pose(arm, name):
     poses = load_json(POSES_FILE, {})
     poses[name] = arm.joints()
@@ -1065,8 +1074,12 @@ small{color:#888}</style></head><body><main><div><img src="/preview" alt="camera
 <button data-h="u">U roll</button><span></span><button data-h="o">O roll</button></div>
 <div class="p"><button data-k="1">slow</button><button data-k="2">medium</button><button data-k="3">fast</button></div>
 <h3>Poses</h3><div class="p"><button data-k="m">M look here (table)</button><button data-k="h">H home</button>
-<button data-k="y">Y history</button></div><h3>Settings</h3><div id="sliders"></div></div></main><script>
+<button data-k="y">Y history</button></div>
+<div class="p"><button id="awaysave">Save as AWAY pose<small>out of the RoArm's way</small></button>
+<button id="awaygo">Go to AWAY</button><span></span></div><h3>Settings</h3><div id="sliders"></div></div></main><script>
 const k=c=>fetch('/key?k='+encodeURIComponent(c));let held={};
+document.getElementById('awaysave').onclick=()=>{if(confirm('Save the current SO-101 pose as AWAY?'))fetch('/so101_pose?name=away&save=1')};
+document.getElementById('awaygo').onclick=()=>fetch('/so101_pose?name=away');
 function press(c){if(held[c])return;k(c);held[c]=setInterval(()=>k(c),1000/30)}
 function release(c){clearInterval(held[c]);delete held[c]}
 function releaseAll(){Object.keys(held).forEach(release)}
@@ -1178,7 +1191,8 @@ def _bottle_data():
     pose = load_json(POSES_FILE, {}).get(HOME_POSE)
     view["joints"] = joints
     view["look_saved"] = bool(pose)
-    view["at_look"] = bool(pose and joints and all(abs(joints[j] - pose[j]) < 4.0 for j in MOVE_JOINTS))
+    # 8 deg: the lift sags ~5 deg below its goal under its own weight (was 4 deg - AUTO waited 40 s and gave up)
+    view["at_look"] = bool(pose and joints and all(abs(joints[j] - pose[j]) < 8.0 for j in MOVE_JOINTS))
     view["still"] = bool(joints) and time.time() - _web.get("moved_t", 0.0) > 0.5 and not _busy.is_set()
     view["tracking"] = _web["tracking"]
     # how many px the image shifts per 1 deg of a joint - roarm_pick.py uses it to fix small errors in returning to the pose
@@ -1299,6 +1313,10 @@ def http_server(arm):
                 self._json(_bottle_data())
             elif url.path == "/tracking" and q.get("on") in ("0", "1"):  # RoArm turns tracking on/off
                 _web_keys.put("track" + q["on"])
+                self._json({"ok": True})
+            elif url.path == "/so101_pose" and re.fullmatch(r"[A-Za-z0-9_-]{1,32}", q.get("name", "")):
+                # go to a saved SO-101 pose (save=1: save the current one under that name)
+                _web_keys.put(("savepose:" if q.get("save") == "1" else "gopose:") + q["name"])
                 self._json({"ok": True})
             elif url.path == "/track_object" and q.get("name") in ("bottle", "basket"):  # what the camera follows
                 _web_keys.put("object:" + q["name"])
@@ -3053,6 +3071,10 @@ def camera_mode(port=None, mock=False):
                     continue
                 elif c == "h":
                     run_task(arm, go_home, "home") or show("arm busy")
+                elif c.startswith("gopose:"):
+                    run_task(arm, lambda a, n=c[7:]: go_saved_pose(a, n), "home") or show("arm busy")
+                elif c.startswith("savepose:"):
+                    show(save_pose(arm, c[9:]))
                 elif c == "g":  # G: follow the (grey) basket <-> bottles
                     globals()["TRACK_OBJECT"] = "bottle" if TRACK_OBJECT == "basket" else "basket"
                     trk.target = None
