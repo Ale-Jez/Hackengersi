@@ -15,6 +15,7 @@ Commands:
     python roarm_pick.py info      calibration summary
     python roarm_pick.py save-rest save where the RoArm is now as its rest pose (waits there for the vehicle)
     python roarm_pick.py poses     list the saved poses (RoArm panel: "Save pose")
+    python roarm_pick.py copy-route NAME   new route NAME = the bottle route with its own copies of the poses
     python roarm_pick.py save-pose NAME   save where the RoArm is now as pose NAME
     python roarm_pick.py goto NAME        move to pose NAME by joint angles
     python roarm_pick.py play [--restart] the saved poses in order; after a failure it continues at the failed step
@@ -680,15 +681,50 @@ def grab(arm, so, cfg, pick, px=None, log=print):
     return False
 
 
-def go_rest(arm, cfg, timeout=20.0):
-    """To the saved rest pose: first straight up by approach_mm (out of the basket), then joint angles (T:102).
-    Joint angles, not x y z: the pose is reached exactly as it was saved, whichever elbow branch that was."""
+def rest_pose(cfg):
     rest = (cfg.get("poses") or {}).get("rest") or cfg["rest"]  # the panel's "rest" pose wins over save-rest
     if not rest:
         raise RuntimeError("no rest pose: place the RoArm and run python roarm_pick.py save-rest")
+    return rest
+
+
+def at_rest(arm, cfg, tol=0.08):
+    """The RoArm already stands at its rest pose (base, shoulder, elbow, wrist within tol rad)."""
+    rest, w = rest_pose(cfg), arm.where()
+    return all(w.get(k) is not None and abs(w[k] - rest[k]) < tol for k in "bset")
+
+
+def check_power(arm, w, what):
+    """Refuse at once when the RoArm has no servo power (never wait for it: power-on must not swing the arm)."""
+    if not arm.mock and (w.get("v") or 0) < 100:  # 0.01 V units
+        raise RuntimeError(f"RoArm servo power is off ({(w.get('v') or 0) / 100:.1f} V) - switch it on, then {what}")
+
+
+def power_and_torque(arm, w, what):
+    """Before a move: servo power must be on (else refuse), and motors switched off (e.g. after a power cut) go on
+    where the arm stands - otherwise the move times out doing nothing."""
+    check_power(arm, w, what)
+    if not arm.mock and not any(w.get(k) for k in ("torswitchB", "torswitchS", "torswitchE")):
+        hold_here(arm, w)
+        arm.send({"T": 210, "cmd": 1})
+        time.sleep(1.0)
+
+
+def go_rest(arm, cfg, timeout=20.0):
+    """To the saved rest pose (joint angles, T:102 - reached exactly as saved, whichever elbow branch that was).
+    Only when the gripper is below the rest pose it first goes straight up (out of the basket), by at most
+    approach_mm and never above the rest height; a lift the arm can't reach (already high / stretched) is skipped."""
+    rest = rest_pose(cfg)
     w = arm.where()
-    go_to(arm, {"x": w["x"], "y": w["y"], "z": w["z"], "t": w["tit"], "r": w["r"]}, w["g"], dz=cfg["approach_mm"],
-          spd=cfg["speed"])
+    power_and_torque(arm, w, "go to rest again")
+    below = UP * (rest["z"] - w["z"]) if rest.get("z") is not None else cfg["approach_mm"]  # mm, world up
+    if below > 20:
+        try:
+            go_to(arm, {"x": w["x"], "y": w["y"], "z": w["z"], "t": w["tit"], "r": w["r"]}, w["g"],
+                  dz=min(cfg["approach_mm"], below), spd=cfg["speed"])
+        except RuntimeError as e:
+            if "cannot reach" not in str(e):
+                raise
     arm.send({"T": 102, "base": rest["b"], "shoulder": rest["s"], "elbow": rest["e"], "wrist": rest["t"],
               "roll": rest["r"], "hand": rest["g"], "spd": int(cfg["speed"] * 1000), "acc": 10})
     if arm.mock:
@@ -700,6 +736,7 @@ def go_rest(arm, cfg, timeout=20.0):
             w = arm.where()
         except RuntimeError:
             continue
+        check_power(arm, w, "go to rest again")  # power lost on the way: say so now, not after the timeout
         if max(abs(w[k] - rest[k]) for k in "bset") < 0.08:
             return
     raise TimeoutError(f"RoArm did not reach its rest pose (it is at {arm.where()})")
@@ -756,8 +793,16 @@ def go_pose(arm, cfg, name, timeout=25.0, stop=None):
 PROGRESS_FILE = os.path.join(_dir, "pick_progress.json")  # which step of the sequence is next (survives a crash)
 
 
-def sequence_of(cfg):
-    """The pick route: cfg "sequence", else the poses in the order they were saved, starting and ending at "rest"."""
+def route_names(cfg):
+    """The taught pick routes: "bottle" (cfg "sequence", used by AUTO) + the extra ones in cfg "routes" (e.g. chicken)."""
+    return ["bottle"] + [n for n in (cfg.get("routes") or {}) if n != "bottle"]
+
+
+def sequence_of(cfg, route="bottle"):
+    """A route's poses in play order. "bottle": cfg "sequence", else the poses in the order they were saved, starting
+    and ending at "rest". Other routes: cfg "routes"[route]."""
+    if route != "bottle":
+        return list((cfg.get("routes") or {}).get(route) or [])
     poses = cfg.get("poses") or {}
     sequence = cfg.get("sequence") or list(poses)
     if not cfg.get("sequence") and "rest" in poses:
@@ -765,7 +810,37 @@ def sequence_of(cfg):
     return sequence
 
 
-def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool_wait_s=600.0, stop=None):
+def copy_route(cfg, src="bottle", dst="chicken"):
+    """New route `dst` = route `src` with each pose (except the shared "rest") copied as "<dst>-<name>" - a starting
+    point to re-teach. Copies that already exist are kept (re-running never overwrites taught poses)."""
+    poses, sequence = cfg.setdefault("poses", {}), []
+    for name in sequence_of(cfg, src):
+        if name != "rest":
+            new = f"{dst}-{name}"[:32]
+            if new not in poses and name in poses:
+                poses[new] = dict(poses[name])
+            name = new
+        sequence.append(name)
+    cfg.setdefault("routes", {})[dst] = sequence
+    return sequence
+
+
+def add_to_route(cfg, route, name):
+    """A newly taught pose joins `route` as its last step before the closing "rest" (the route still ends at rest).
+    Already in the route: nothing changes. The "bottle" route is cfg "sequence" (made explicit if it was derived)."""
+    if route == "bottle":
+        sequence = cfg["sequence"] = sequence_of(cfg, "bottle")
+    else:
+        sequence = cfg.setdefault("routes", {}).setdefault(route, ["rest", "rest"])
+    if name in sequence:
+        return sequence
+    at = len(sequence) - 1 if sequence and sequence[-1] == "rest" else len(sequence)
+    sequence.insert(at, name)
+    return sequence
+
+
+def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool_wait_s=600.0, stop=None,
+         route="bottle"):
     """Taught pick: the saved poses one after another (cfg "sequence", else the order they were saved in, starting
     and ending at "rest" - the arm finishes where it started).
 
@@ -774,7 +849,7 @@ def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool
     answers again, then the same step). restart=True starts from the first pose. Returns True when all are done."""
     progress_file = progress_file or PROGRESS_FILE
     poses = cfg.get("poses") or {}
-    sequence = sequence_of(cfg)
+    sequence = sequence_of(cfg, route)
     missing = [n for n in sequence if n not in poses]
     if not sequence or missing:
         raise RuntimeError(f"sequence {sequence}: missing poses {missing}" if missing else "no poses saved")
@@ -791,13 +866,7 @@ def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool
             json.dump({"sequence": sequence, "next": nxt, "t": time.time()}, f)
 
     if not arm.mock:
-        w = arm.where()
-        if (w.get("v") or 0) < 100:  # 0.01 V units: no servo power - never wait for it (power-on must not swing the arm)
-            raise RuntimeError("RoArm servo power is off (0 V) - switch it on, then run play again")
-        if not any(w.get(k) for k in ("torswitchB", "torswitchS", "torswitchE")):  # motors off: on, where it stands
-            hold_here(arm, w)
-            arm.send({"T": 210, "cmd": 1})
-            time.sleep(1.0)
+        power_and_torque(arm, arm.where(), "run play again")
 
     while step < len(sequence):
         name = sequence[step]
@@ -855,6 +924,15 @@ def mission_paused(progress_file=None):
         return False
 
 
+def paused_route(cfg, progress_file=None):
+    """Which route was stopped before its end (Continue resumes it) - None when nothing is paused."""
+    if not mission_paused(progress_file):
+        return None
+    with open(progress_file or PROGRESS_FILE, encoding="utf-8") as f:
+        saved = json.load(f)["sequence"]
+    return next((r for r in route_names(cfg) if sequence_of(cfg, r) == saved), None)
+
+
 def abort(arm, so, cfg, log=print, progress_file=None):
     """Abort the stopped mission in total: the progress is forgotten (the next Play pick starts from the first pose),
     the RoArm goes to its rest pose, then the SO-101 to its M pose with tracking off. RoArm first: it clears the
@@ -883,7 +961,8 @@ def wait_for_bottle(so, stop=None, min_conf=0.7, poll=0.1):
 
 
 def auto(arm, so, cfg, log=print, stop=None, cycles=1, progress_file=None):
-    """Demo loop: 1. the SO-101 goes to its saved look pose (key M), tracking off; 2. it detects a bottle;
+    """Demo loop: 1. both arms to their waiting poses - the RoArm to rest first (it clears the table), then the
+    SO-101 to its saved look pose (key M), tracking off; 2. the SO-101 detects a bottle;
     3. after detect_s the RoArm starts the taught sequence AND the SO-101 moves to its "away" pose at the same time;
     4. the sequence ends with the RoArm at rest - and AUTO ends (one bottle per press; cycles=None = loop, with the
     SO-101 back at M and after_pick_s between picks). The sequence resumes at a failed step."""
@@ -891,6 +970,12 @@ def auto(arm, so, cfg, log=print, stop=None, cycles=1, progress_file=None):
     while cycles is None or done < cycles:
         so.demo("start")  # /demo: stage 1 searching (the scripted presentation runs only in AUTO)
         so.tracking(False)  # the camera must not follow the bottle into the RoArm's path
+        if not at_rest(arm, cfg):  # already there: no needless lift-and-return
+            log("RoArm to its rest pose...")
+            so.status("RoArm to rest")
+            go_rest(arm, cfg)
+        if stop is not None and stop.is_set():
+            raise Stopped("stopped while the RoArm went to rest")
         so.look(force=True)  # M pose - also when it comes from "away" (far from M)
         wait_for_look(so, stop=stop)
         so.status("waiting for a bottle")
@@ -1077,11 +1162,22 @@ def test():
         try:
             reached.clear()
             aso = AutoSO()
+            send_orig = arm2.send
+            arm2.send = lambda c: (aso.calls.append("roarm:rest") if c.get("T") == 102 else None, send_orig(c))
+            arm2.fb.update(b=1.0, s=0.5, e=1.0, t=0.0, g=3.0)  # not at rest
             n = auto(arm2, aso, dict(pcfg, detect_s=0.2, after_pick_s=0), log=lambda *_: None, cycles=1,
                      progress_file=os.path.join(tempfile.mkdtemp(), "p.json"))
-            assert n == 1 and aso.calls == ["look", "pose:away"], aso.calls  # one bottle, then AUTO ends
+            # AUTO pressed: RoArm to rest FIRST, then the SO-101 to M; one bottle, then AUTO ends
+            assert n == 1 and aso.calls == ["roarm:rest", "look", "pose:away"], aso.calls
             assert aso.demo_events == ["start", "seen"], aso.demo_events  # /demo story: searching, bottle seen
             assert reached == ["rest", "aim", "grip", "lift", "rest"] and aso.tracks is False, reached
+            rest = pcfg["poses"]["rest"]
+            arm2.fb.update(b=rest["b"], s=rest["s"], e=rest["e"], t=rest["t"])  # already at rest: no lift-and-return
+            aso = AutoSO()
+            auto(arm2, aso, dict(pcfg, detect_s=0.2, after_pick_s=0), log=lambda *_: None, cycles=1,
+                 progress_file=os.path.join(tempfile.mkdtemp(), "p.json"))
+            assert aso.calls[0] == "look", aso.calls
+            arm2.send = send_orig
         finally:
             globals()["go_pose"] = orig_go_pose
         # rest pose: lift first (world up), then the saved joint angles
@@ -1090,6 +1186,54 @@ def test():
         arm2.fb.update(x=200.0, y=0.0, z=50.0, tit=1.57, r=0.0, g=3.0)
         go_rest(arm2, dict(cfg, rest={"b": 0.79, "s": 0.0, "e": 2.06, "t": 1.46, "r": -3.1, "g": 3.1}))
         assert sent[-1]["T"] == 102 and sent[-1]["elbow"] == 2.06 and arm2.fb["z"] == 50.0 + cfg["approach_mm"], sent
+        # 2026-09-27 AUTO: RoArm high and turned (z 328, tilt -2.2), the lift +80 mm out of reach -> skip it, go to rest
+        rest_hi = {"b": 0.79, "s": 0.0, "e": 2.06, "t": 1.46, "r": -3.1, "g": 3.1, "z": 13.6}
+        orig_command = globals()["command"]
+
+        tried = []
+
+        def unreachable(*a, **k):
+            tried.append(a[3])  # the lift's z
+            raise RuntimeError("RoArm cannot reach x=-115 y=23 z=408 tilt -2.20")
+        globals()["command"] = unreachable
+        try:
+            sent.clear()
+            arm2.fb.update(x=-115.0, y=23.0, z=-50.0, tit=-2.2)  # below the rest height: tries the lift, can't
+            go_rest(arm2, dict(cfg, rest=rest_hi))
+            assert tried and abs(tried[0] - (-50.0 + UP * 63.6)) < 0.5, tried  # up to the rest height, not +80
+            assert sent[-1]["T"] == 102, sent
+            sent.clear()
+            arm2.fb.update(z=328.0)  # above the rest height: no lift at all
+            go_rest(arm2, dict(cfg, rest=rest_hi))
+            assert [c["T"] for c in sent] == [102] and len(tried) == 1, (sent, tried)
+        finally:
+            globals()["command"] = orig_command
+
+        class NoPower:  # servo power cut (seen 2026-09-27: v 0.03 V, torque off, temps 0)
+            mock, volts = False, None
+
+            def __init__(self, v_now, v_later):
+                self.vs, self.sent = [v_now, v_later], []
+
+            def where(self):
+                v = self.vs.pop(0) if len(self.vs) > 1 else self.vs[0]
+                return dict(x=0.0, y=0.0, z=300.0, tit=0.0, r=0.0, g=3.0, b=2.3, s=0.2, e=0.5, t=-0.8, v=v,
+                            torswitchB=int(v > 100))
+
+            def send(self, c):
+                self.sent.append(c)
+        for v_now, v_later, sends in ((3, 3, 0), (1204, 3, 1)):  # off from the start / cut on the way
+            dead = NoPower(v_now, v_later)
+            try:
+                go_rest(dead, dict(cfg, rest=rest_hi), timeout=2)
+                raise AssertionError("no power must fail fast")
+            except RuntimeError as e:
+                assert "power is off" in str(e) and len(dead.sent) == sends, (e, dead.sent)
+        back = NoPower(1204, 1204)  # power back after a cut: motors off -> hold where it is, torque on, then rest
+        back.where = lambda: dict(x=0.0, y=0.0, z=300.0, tit=0.0, r=0.0, g=3.0, v=1204, torswitchB=0,
+                                  **{k: rest_hi[k] for k in "bset"})
+        go_rest(back, dict(cfg, rest=rest_hi), timeout=2)
+        assert [c["T"] for c in back.sent] == [102, 210, 102] and back.sent[1]["cmd"] == 1, back.sent
 
         # abort after a stop: paused mission -> progress gone (next Play from the start), RoArm rest, then SO-101 to M
         prog = os.path.join(tempfile.mkdtemp(), "progress.json")
@@ -1110,6 +1254,26 @@ def test():
         assert mission_paused(prog)
         assert sequence_of({"poses": {"aim": 1, "rest": 2}}) == ["rest", "aim", "rest"]
         assert sequence_of({"poses": {"aim": 1}, "sequence": ["aim"]}) == ["aim"]
+        # second route (chicken): a copy of the bottle route, own poses "chicken-<name>", the shared rest
+        rc = {"poses": {"rest": {"b": 0}, "aim": {"b": 1}, "grip": {"b": 2}}, "sequence": ["rest", "aim", "grip", "rest"]}
+        assert copy_route(rc) == ["rest", "chicken-aim", "chicken-grip", "rest"] and rc["poses"]["chicken-aim"] == {"b": 1}
+        rc["poses"]["chicken-aim"]["b"] = 9  # taught later - copying again keeps it
+        copy_route(rc)
+        assert rc["poses"]["chicken-aim"]["b"] == 9 and rc["poses"]["aim"]["b"] == 1
+        assert route_names(rc) == ["bottle", "chicken"] and sequence_of(rc, "chicken")[1] == "chicken-aim"
+        with open(prog, "w") as f:
+            json.dump({"sequence": sequence_of(rc, "chicken"), "next": 2}, f)
+        assert paused_route(rc, prog) == "chicken"
+        with open(prog, "w") as f:
+            json.dump({"sequence": sequence_of(rc, "chicken"), "next": 4}, f)
+        assert paused_route(rc, prog) is None
+        # teaching new chicken poses: each new one goes in just before the closing rest, in the order saved
+        rc["routes"]["chicken"] = ["rest", "chicken-aim", "rest"]
+        add_to_route(rc, "chicken", "chicken-new1")
+        add_to_route(rc, "chicken", "chicken-new2")
+        add_to_route(rc, "chicken", "chicken-new1")  # saved again (overwrite): stays where it is
+        assert rc["routes"]["chicken"] == ["rest", "chicken-aim", "chicken-new1", "chicken-new2", "rest"], rc["routes"]
+        assert add_to_route({"poses": {"rest": 1, "a": 2}}, "bottle", "b") == ["rest", "a", "b", "rest"]
 
         # kinematics: RoArm feedback 2026-09-27 (b s e t) -> z 270 mm; ik(fk(q)) returns to the same elbow branch
         x, y, z, tit = fk(2.37, 0.26, 0.17, 1.56)
@@ -1193,6 +1357,9 @@ def main():
             print(f"  {name:16s} b={v['b']:+.2f} s={v['s']:+.2f} e={v['e']:+.2f} t={v['t']:+.2f} r={v['r']:+.2f} "
                   f"g={v['g']:.2f} | x={v['x']:.0f} y={v['y']:.0f} z={v['z']:.0f}")
         print("" if cfg.get("poses") else "no poses saved")
+    elif cmd == ["copy-route"] and sys.argv[2:3] and re.fullmatch(r"[a-z][a-z0-9_]{0,15}", sys.argv[2]):
+        print(f"route {sys.argv[2]}:", " > ".join(copy_route(cfg, "bottle", sys.argv[2])))
+        save_config(cfg)
     elif cmd == ["save-pose"] and sys.argv[2:3]:
         w = arm.where()
         cfg.setdefault("poses", {})[sys.argv[2]] = {k: round(w[k], 4)
