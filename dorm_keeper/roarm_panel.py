@@ -61,7 +61,7 @@ class RoArmPanel:
         self.hot = False
         self.playing = {"running": False, "log": []}  # the taught pick sequence (roarm_pick.play) in a thread
         self._stop = threading.Event()
-        self._abort_to_rest = False  # if True, go to rest pose after stopping
+        self.stopped = None       # "auto" / "pick": the last run ended in a Stop or failure -> Continue / Abort shown
         threading.Thread(target=self._loop, daemon=True).start()
         threading.Thread(target=self._websocket, daemon=True).start()
 
@@ -319,12 +319,10 @@ class RoArmPanel:
 
         self.dir = None
         self._stop.clear()
+        self.stopped = None
         self.playing = {"running": True, "log": ["--- " + ("AUTO: waiting for a bottle" if auto else "pick " + (
             "from the start" if restart else "(continue)")) + " ---"]}
-
-        def log(text):
-            self.playing["log"] = (self.playing["log"] + [text])[-60:]
-            self.state["message"] = text.strip()
+        log = self._log
 
         def run():
             try:
@@ -335,18 +333,11 @@ class RoArmPanel:
                 else:
                     roarm_pick.play(arm, cfg, restart=restart, log=log, stop=self._stop)
             except roarm_pick.Stopped as e:
-                if self._abort_to_rest:
-                    log("ABORTED - returning to rest position...")
-                    try:
-                        roarm_pick.go_rest(arm, roarm_pick.load_config())
-                        log("Back at rest position")
-                    except Exception as e:
-                        log(f"ERROR going to rest: {e}")
-                    self._abort_to_rest = False
-                else:
-                    log(f"STOPPED: {e} - Play pick continues from here")
-            except Exception as e:  # any failure: shown on the page, progress kept for the next Play pick
-                log(f"ERROR: {e} - Play pick continues from the failed step")
+                self.stopped = "auto" if auto else "pick"
+                log(f"STOPPED: {e} - Continue resumes, Abort mission resets both arms")
+            except Exception as e:  # any failure: shown on the page, progress kept for Continue / Play pick
+                self.stopped = "auto" if auto else "pick"
+                log(f"ERROR: {e} - Continue resumes at the failed step, Abort mission resets both arms")
             finally:
                 self.playing["running"] = False
                 self.target = None  # the panel re-reads the position before its next move
@@ -354,19 +345,77 @@ class RoArmPanel:
         threading.Thread(target=run, daemon=True).start()
         return True
 
+    def _log(self, text):
+        self.playing["log"] = (self.playing["log"] + [text])[-60:]
+        self.state["message"] = text.strip()
+
+    def start_abort(self):
+        """After a Stop: abort the mission in total (roarm_pick.abort - progress cleared, RoArm to rest, SO-101 to M)
+        in a thread, logged like a pick. False while something runs (Stop it first)."""
+        if self.playing["running"]:
+            return False
+        import roarm_pick
+
+        self.dir = None
+        self.stopped = None
+        self.playing = {"running": True, "log": self.playing["log"] + ["--- ABORT: RoArm to rest, SO-101 to M ---"]}
+
+        def run():
+            try:
+                cfg = roarm_pick.load_config()
+                roarm_pick.abort(roarm_pick.RoArm(cfg["roarm_ip"]), roarm_pick.SO101(cfg["so101_url"]), cfg,
+                                 log=self._log)
+            except Exception as e:  # RoArm not at rest -> the SO-101 was not moved either
+                self._log(f"ABORT FAILED: {e}")
+            finally:
+                self.playing["running"] = False
+                self.target = None
+
+        threading.Thread(target=run, daemon=True).start()
+        return True
+
     def data(self):
+        import roarm_pick
+
         return dict(self.state, speed=self.speed, poses=_config().get("poses") or {}, playing=self.playing,
-                    sequence=_config().get("sequence"))
+                    sequence=roarm_pick.sequence_of(_config()), paused=bool(self.stopped) or roarm_pick.mission_paused(),
+                    stopped=self.stopped)
 
 
 _panel = None
+
+
+# Pages of the station's web site (so101_station.py serves them all): path, menu label, tab title, tab icon (emoji)
+PAGES = [("/roarm_panel", "RoArm panel", "RoArm · Admin panel", "\U0001F9BE"),
+         ("/so101", "SO-101 camera", "SO-101 · Camera arm", "\U0001F4F7"),
+         ("/demo", "Live demo", "Dorm-Keeper · Live demo", "\U0001F3AC")]
+MENU_CSS = """<style>#menu{position:sticky;top:0;z-index:50;display:flex;gap:4px;align-items:center;flex-wrap:wrap;
+padding:6px 12px;background:#070a0e;border-bottom:1px solid #243040;font:600 14px system-ui,"Segoe UI",sans-serif}
+#menu a{color:#8a9aac;text-decoration:none;padding:7px 12px;border-radius:8px}#menu a:hover{background:#18212c;color:#e8eef5}
+#menu a.on{background:#18212c;color:#4cc2ff}#menu b{color:#e8eef5;margin-right:10px}:fullscreen #menu{display:none}</style>"""
+
+
+def with_menu(page, path):
+    """Any station page (bytes) + the menu strip on top, its tab title and emoji tab icon. The demo page is a
+    full-screen grid (rows: header, main) - it gets one more row for the menu; full screen hides the menu."""
+    _, _, title, icon = next(p for p in PAGES if p[0] == path)
+    favicon = ('<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 '
+               f'viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>{icon}</text></svg>">')
+    extra = "<style>body{grid-template-rows:auto auto 1fr}#menu{margin:-18px -22px 0}</style>" if path == "/demo" else ""
+    menu = '<nav id="menu"><b>Hackengersi</b>' + "".join(
+        f'<a href="{p}"{" class=on" if p == path else ""}>{i} {label}</a>' for p, label, _, i in PAGES) + "</nav>"
+    html = page.decode("utf-8")
+    html = re.sub(r"<title>.*?</title>", f"<title>{title}</title>", html, count=1, flags=re.S)
+    html = html.replace("</head>", favicon + MENU_CSS + extra + "</head>", 1)
+    html = re.sub(r"(<body[^>]*>)", lambda m: m.group(1) + menu, html, count=1)
+    return html.encode("utf-8")
 
 
 def handle(h, path, q):
     """Serve /roarm_panel and /roarm/... (h = the so101_station.py request handler: has _json)."""
     global _panel
     if path == "/roarm_panel":
-        body = HTML.encode()
+        body = with_menu(HTML.encode(), path)
         h.send_response(200)
         h.send_header("Content-Type", "text/html; charset=utf-8")
         h.send_header("Content-Length", str(len(body)))
@@ -396,10 +445,8 @@ def handle(h, path, q):
     if path == "/roarm/command" and q.get("c") == "stop" and p.playing["running"]:
         p._stop.set()  # the pick sequence holds the arm where it is and stops
         return h._json({"ok": True})
-    if path == "/roarm/command" and q.get("c") == "abort_to_rest" and p.playing["running"]:
-        p._abort_to_rest = True
-        p._stop.set()  # stop the sequence, then go to rest in the run() finally block
-        return h._json({"ok": True})
+    if path == "/roarm/abort":  # after Stop, confirmed on the page: the whole mission is dropped
+        return h._json({"ok": p.start_abort()})
     if path == "/roarm/command" and q.get("c") in COMMANDS:
         with p._lock:
             p.commands.append(q["c"])
@@ -432,7 +479,21 @@ button:active,button.on{background:var(--accent);color:#06121e}button small{disp
 details{margin-top:8px;font-size:13px;color:var(--dim)}#servos{display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;margin-top:6px;font-variant-numeric:tabular-nums}
 </style></head><body><main>
 <div><div class="card"><h1>RoArm control</h1><span style="color:var(--dim)">SO-101 camera image (what the program sees)</span>
-<img src="/preview?clean=1&fps=8" alt="SO-101 camera"><div id="msg">connecting...</div></div></div>
+<img src="/preview?clean=1&fps=8" alt="SO-101 camera"><div id="msg">connecting...</div></div>
+<div class="card" style="margin-top:14px">
+<h2>Pick sequence</h2><div class="grid">
+<button id="play" class="green">Play pick<small>continues after a failure</small></button>
+<button id="playstart">Play from start</button><button id="playstop" style="background:var(--bad)">Stop</button>
+<div id="stopped" style="grid-column:1/4;display:none;grid-template-columns:1fr 1fr;gap:6px">
+<button id="continue" class="green">Continue<small>from the stopped step</small></button>
+<button id="abort" style="background:var(--warn);color:#000">Abort mission<small>RoArm to rest, SO-101 to M</small></button></div>
+<button id="auto" class="green" style="grid-column:1/4">AUTO: bottle seen -> 1 s -> SO-101 moves away -> RoArm picks it -> rest</button></div>
+<div id="seq" style="margin-top:6px;font-size:12px;color:var(--dim)"></div>
+<pre id="playlog" style="background:#05080b;border-radius:8px;padding:8px;height:150px;overflow:auto;font-size:12px;margin:8px 0 0;white-space:pre-wrap">(pick log)</pre>
+<h2>Saved poses (joint angles)</h2><div class="grid" style="grid-template-columns:2fr 1fr">
+<input id="posename" placeholder="name, e.g. above_neck" style="font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:#0b0f14;color:var(--text)">
+<button id="savepose" class="green">Save pose</button></div>
+<div id="poses" style="margin-top:6px;font-size:13px;font-variant-numeric:tabular-nums"></div></div></div>
 <div class="card">
 <div class="pos"><div><span>reach</span><b id="px">-</b></div><div><span>base angle</span><b id="py">-</b></div><div><span>height</span><b id="pz">-</b></div></div>
 <h2>System</h2><div class="sys">
@@ -460,16 +521,6 @@ details{margin-top:8px;font-size:13px;color:var(--dim)}#servos{display:grid;grid
 <button data-k="r+">roll gripper</button><button data-k="r-">roll gripper</button><span></span></div>
 <h2>Gripper</h2><div class="grid">
 <button data-c="toggle">GRAB / RELEASE</button><button data-c="lift" class="green">GRAB AND LIFT<small>10 cm up</small></button><button data-c="open">open</button></div>
-<h2>Pick sequence</h2><div class="grid">
-<button id="play" class="green">Play pick<small>continues after a failure</small></button>
-<button id="playstart">Play from start</button><button id="playstop" style="background:var(--bad)">Stop</button>
-<button id="auto" class="green" style="grid-column:1/4">AUTO: bottle seen -> 1 s -> SO-101 moves away -> RoArm picks it -> rest</button></div>
-<div id="seq" style="margin-top:6px;font-size:12px;color:var(--dim)"></div>
-<pre id="playlog" style="background:#05080b;border-radius:8px;padding:8px;height:150px;overflow:auto;font-size:12px;margin:8px 0 0;white-space:pre-wrap">(pick log)</pre>
-<h2>Saved poses (joint angles)</h2><div class="grid" style="grid-template-columns:2fr 1fr">
-<input id="posename" placeholder="name, e.g. above_neck" style="font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:#0b0f14;color:var(--text)">
-<button id="savepose" class="green">Save pose</button></div>
-<div id="poses" style="margin-top:6px;font-size:13px;font-variant-numeric:tabular-nums"></div>
 <h2>Speed</h2><div class="grid"><button data-v="slow">slow<small>aiming</small></button><button data-v="normal" class="on">normal</button><button data-v="fast">fast</button></div>
 </div></main><script>
 const $=id=>document.getElementById(id),get=u=>fetch(u).then(r=>r.json()).catch(()=>({}));
@@ -515,25 +566,34 @@ async function refreshSystem(){const s=await get('/system'),w=[];
  $('servos').innerHTML=all.join('')||'no data';setTimeout(refreshSystem,1000)}refreshSystem();
 $('savepose').onclick=()=>{const n=$('posename').value.trim();if(!/^[A-Za-z0-9_-]{1,32}$/.test(n)){alert('Name: letters, digits, _ or - (max 32)');return}
  get('/roarm/save_pose?name='+n)};
-let posesShown='';
-function showPoses(p){const key=JSON.stringify(p||{});if(key===posesShown)return;posesShown=key;
- $('poses').innerHTML=Object.entries(p||{}).map(([n,v])=>`<div style="display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:center;margin:4px 0">
- <span><b>${n}</b><br><small style="color:var(--dim)">b ${v.b.toFixed(2)} s ${v.s.toFixed(2)} e ${v.e.toFixed(2)} t ${v.t.toFixed(2)} r ${v.r.toFixed(2)} g ${v.g.toFixed(2)}</small></span>
- <button data-go="${n}">go</button><button data-del="${n}">delete</button></div>`).join('')||'<small style="color:var(--dim)">none yet</small>';
+let posesShown='';const closed=new Set();  // folders the user folded stay folded when the list is redrawn
+function poseRow(n,v,step){return `<div style="display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:center;margin:4px 0">
+ <span>${step?`<small style="color:var(--dim)">${step}.</small> `:''}<b>${n}</b><br>${v?`<small style="color:var(--dim)">b ${v.b.toFixed(2)} s ${v.s.toFixed(2)} e ${v.e.toFixed(2)} t ${v.t.toFixed(2)} r ${v.r.toFixed(2)} g ${v.g.toFixed(2)}</small>`:'<small style="color:var(--bad)">not saved</small>'}</span>
+ <button data-go="${n}">go</button><button data-del="${n}">del</button></div>`}
+function folder(id,title,rows){return `<details data-f="${id}"${closed.has(id)?'':' open'} style="border:1px solid var(--line);border-radius:8px;padding:6px 10px;margin:6px 0">
+ <summary style="cursor:pointer;font-weight:700">&#128193; ${title}</summary>${rows}</details>`}
+function showPoses(p,seq){p=p||{};seq=seq||[];const key=JSON.stringify([p,seq]);if(key===posesShown)return;posesShown=key;
+ const other=Object.keys(p).filter(n=>!seq.includes(n));  // one folder per path (now: the pick route) + the rest
+ $('poses').innerHTML=(seq.length?folder('route',`pick route <small style="color:var(--dim)">${seq.length} steps</small>`,seq.map((n,i)=>poseRow(n,p[n],i+1)).join('')):'')
+  +(other.length?folder('other',`other poses <small style="color:var(--dim)">${other.length}, not in a route</small>`,other.map(n=>poseRow(n,p[n])).join('')):'')
+  ||'<small style="color:var(--dim)">none yet</small>';
+ document.querySelectorAll('#poses details').forEach(d=>d.ontoggle=()=>d.open?closed.delete(d.dataset.f):closed.add(d.dataset.f));
  document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>{if(confirm('Move the RoArm to pose '+b.dataset.go+'?'))get('/roarm/goto_pose?name='+b.dataset.go)});
  document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{if(confirm('Delete pose '+b.dataset.del+'?'))get('/roarm/delete_pose?name='+b.dataset.del)})}
 $('play').onclick=()=>get('/roarm/play?from=continue');
 $('playstart').onclick=()=>{if(confirm('Run the whole pick sequence from the first pose?'))get('/roarm/play?from=start')};
-$('playstop').onclick=()=>{
- if(confirm('Stop the sequence? Press OK to ABORT and return to rest position, or Cancel to just pause.'))
-  get('/roarm/command?c=abort_to_rest');
- else
-  get('/roarm/command?c=stop')};
+$('playstop').onclick=()=>get('/roarm/command?c=stop');
+let actedAt=0;const hideStopped=()=>{actedAt=Date.now();$('stopped').style.display='none'};
+let lastState={};  // Continue resumes what was stopped: AUTO again (its route resumes at the stopped step) or the pick
+$('continue').onclick=()=>{hideStopped();get('/roarm/play?from='+(lastState.stopped==='auto'?'auto':'continue'))};
+$('abort').onclick=()=>{if(confirm('Abort the whole mission?\\n\\nThe RoArm goes back to its rest pose, the SO-101 to its M pose, and the stopped progress is discarded (the next Play pick starts from the first pose).')){hideStopped();get('/roarm/abort')}};
 $('auto').onclick=()=>{if(confirm('Start AUTO? The next bottle seen is picked, then the RoArm goes back to rest.'))get('/roarm/play?from=auto')};
-function showPlay(d){const p=d.playing||{};$('play').disabled=$('playstart').disabled=$('auto').disabled=!!p.running;
+function showPlay(d){lastState=d;const p=d.playing||{};$('play').disabled=$('playstart').disabled=$('auto').disabled=!!p.running;
+ // Continue / Abort only after a Stop (or failure): gone while anything runs and right after one is clicked
+ $('stopped').style.display=!p.running&&d.paused&&Date.now()-actedAt>2000?'grid':'none';
  $('seq').textContent=d.sequence?('route: '+d.sequence.join(' > ')):'';
  if(p.log&&p.log.length){const l=$('playlog'),t=p.log.join('\\n');if(l.textContent!==t){l.textContent=t;l.scrollTop=l.scrollHeight}}}
-async function refresh(){const d=await get('/roarm/state');showPoses(d.poses);showPlay(d);if(d.x!==undefined){$('px').textContent=Math.round(Math.hypot(d.x,d.y))+' mm';$('py').textContent=Math.round(Math.atan2(d.y,d.x)*180/Math.PI)+' deg';$('pz').textContent=Math.round(d.z)+' mm'}
+async function refresh(){const d=await get('/roarm/state');showPoses(d.poses,d.sequence);showPlay(d);if(d.x!==undefined){$('px').textContent=Math.round(Math.hypot(d.x,d.y))+' mm';$('py').textContent=Math.round(Math.atan2(d.y,d.x)*180/Math.PI)+' deg';$('pz').textContent=Math.round(d.z)+' mm'}
  roarm=d;bar($('lshoulder'),d.shoulder_load);bar($('lelbow'),d.elbow_load);
  $('t-shoulder').textContent=d.shoulder_load!=null?Math.abs(d.shoulder_load):'-';$('t-elbow').textContent=d.elbow_load!=null?Math.abs(d.elbow_load):'-';
  $('msg').textContent=d.message||'';$('msg').className=(!d.connected||/OVERLOAD/.test(d.message||''))?'bad':'';

@@ -67,6 +67,41 @@
   .overlay.top { top: 14px; }
   .overlay.bottom { bottom: 14px; }
   .overlay .chip { background: #0b0f14cc; backdrop-filter: blur(6px); color: var(--text); }
+
+  /* scripted presentation (AUTO): scan frame on the bottle, laser, barcode being read, result */
+  .scan { position: absolute; inset: 0; pointer-events: none; }
+  .scan .frame {
+    --c: var(--rotate); position: absolute; border-radius: 10px; transition: left .25s, top .25s, width .25s, height .25s, background-color .3s;
+    background:
+      linear-gradient(var(--c), var(--c)) top left / 34px 5px, linear-gradient(var(--c), var(--c)) top left / 5px 34px,
+      linear-gradient(var(--c), var(--c)) top right / 34px 5px, linear-gradient(var(--c), var(--c)) top right / 5px 34px,
+      linear-gradient(var(--c), var(--c)) bottom left / 34px 5px, linear-gradient(var(--c), var(--c)) bottom left / 5px 34px,
+      linear-gradient(var(--c), var(--c)) bottom right / 34px 5px, linear-gradient(var(--c), var(--c)) bottom right / 5px 34px;
+    background-repeat: no-repeat; filter: drop-shadow(0 0 8px var(--c));
+  }
+  .scan.CENTERING .frame { animation: aim .5s ease-in-out infinite alternate; }
+  @keyframes aim { from { transform: scale(1.08); } to { transform: scale(1); } }
+  .scan.READING .frame { --c: var(--accent); }
+  .scan.RESULT .frame { --c: var(--deposit); background-color: #2ecc7122; }
+  .scan .tag {
+    position: absolute; left: 0; bottom: calc(100% + 8px); white-space: nowrap; padding: 5px 12px; border-radius: 999px;
+    background: #0b0f14dd; color: var(--c); font-weight: 800; font-size: 16px; border: 1px solid var(--c);
+  }
+  .scan .laser {
+    display: none; position: absolute; left: 4%; right: 4%; height: 3px; border-radius: 3px; background: #ff3b3b;
+    box-shadow: 0 0 14px 4px #ff3b3bcc; animation: sweep .6s ease-in-out infinite alternate;
+  }
+  .scan.READING .laser { display: block; }
+  @keyframes sweep { from { top: 6%; } to { top: 92%; } }
+  .scan .code {
+    display: none; position: absolute; width: 230px; background: #fff; color: #000; border-radius: 10px; padding: 10px 14px 8px;
+    box-shadow: 0 10px 30px #000a; text-align: center; animation: pop .3s ease-out;
+  }
+  .scan.READING .code, .scan.RESULT .code { display: block; }
+  .scan .code svg { display: block; height: 58px; width: 100%; }
+  .scan .digits { font: 700 18px/1.2 ui-monospace, Consolas, monospace; letter-spacing: 2px; margin-top: 4px; min-height: 22px; }
+  .scan .pname { display: none; font: 600 13px system-ui, sans-serif; color: #1b4d33; margin-top: 2px; }
+  .scan.RESULT .pname { display: block; }
   .no-image { position: absolute; color: var(--muted); font-size: 18px; }
 
   .stages { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
@@ -157,6 +192,11 @@
       <img id="image" alt="Image from the camera on the SO-101 arm">
       <div class="overlay top"><span class="chip">● Camera on the SO-101 arm</span></div>
       <div class="overlay bottom" id="detections"></div>
+      <div class="scan" id="scan" hidden>
+        <div class="frame" id="scan-frame"><i class="laser"></i><span class="tag" id="scan-tag"></span></div>
+        <div class="code" id="scan-code"><svg id="bars" viewBox="0 0 113 50" preserveAspectRatio="none"></svg>
+          <div class="digits" id="digits"></div><div class="pname" id="pname"></div></div>
+      </div>
     </div>
     <div class="stages" id="stages">
       <div class="stage" data-stage="SEARCHING"><span class="nr">1</span><div><b>Searching</b><small>the neural network looks for bottles</small></div></div>
@@ -259,12 +299,69 @@ async function refresh() {
     $("n-deposit").textContent = d.counter.deposit;
     $("n-total").textContent = money(d.counter.total);
     showStage(d); showResult(d); showHistory(d);
+    script = d.script || null; scriptAt = performance.now();
   } catch (e) {
     $("connection").classList.remove("live");
     $("connection-txt").textContent = "no connection";
   }
-  setTimeout(refresh, 400);
+  setTimeout(refresh, script ? 150 : 400);  // the scripted story changes stage every second: poll faster
 }
+
+// ---- scripted presentation (only after AUTO was started in the RoArm panel): overlay on the camera image ----
+let script = null, scriptAt = 0, barsFor = null;
+
+function ean13Bits(code) {  // real EAN-13 modules (95): the drawn barcode is the code being "read"
+  const L = ["0001101","0011001","0010011","0111101","0100011","0110001","0101111","0111011","0110111","0001011"];
+  const G = L.map(c => [...c].map(b => b === "1" ? "0" : "1").reverse().join(""));
+  const R = L.map(c => [...c].map(b => b === "1" ? "0" : "1").join(""));
+  const PARITY = ["LLLLLL","LLGLGG","LLGGLG","LLGGGL","LGLLGG","LGGLLG","LGGGLL","LGLGLG","LGLGGL","LGGLGL"];
+  const d = [...code].map(Number), par = PARITY[d[0]];
+  let bits = "101";
+  for (let i = 1; i <= 6; i++) bits += (par[i - 1] === "L" ? L : G)[d[i]];
+  bits += "01010";
+  for (let i = 7; i <= 12; i++) bits += R[d[i]];
+  return bits + "101";
+}
+
+function drawBars(code) {
+  if (barsFor === code) return;
+  barsFor = code;
+  $("bars").innerHTML = [...ean13Bits(code)].map((b, i) => b === "1" ? `<rect x="${i + 9}" y="0" width="1" height="50"/>` : "").join("");
+}
+
+function imageRect() {  // where the camera picture really is inside the box (object-fit: contain adds bars)
+  const cam = $("camera"), img = $("image"), cw = cam.clientWidth, ch = cam.clientHeight;
+  const nw = img.naturalWidth || cw, nh = img.naturalHeight || ch, k = Math.min(cw / nw, ch / nh);
+  return { x: (cw - nw * k) / 2, y: (ch - nh * k) / 2, w: nw * k, h: nh * k };
+}
+
+function scriptStage() {  // between polls the clock runs on here, so the stages switch on time
+  if (!script) return [null, null];
+  if (script.since == null) return [script.stage, null];
+  const since = script.since + (performance.now() - scriptAt) / 1000;
+  return [since < script.centering_s ? "CENTERING" : since < script.centering_s + script.reading_s ? "READING" : "RESULT", since];
+}
+
+function drawScript() {
+  requestAnimationFrame(drawScript);
+  const scan = $("scan"), [stage, since] = scriptStage();
+  if (!stage || stage === "SEARCHING") { scan.hidden = true; return; }
+  scan.hidden = false;
+  scan.className = "scan " + stage;
+  const r = imageRect(), b = script.box || [0.36, 0.12, 0.64, 0.88];  // no box: the middle of the picture
+  const fx = r.x + b[0] * r.w, fy = r.y + b[1] * r.h, fw = (b[2] - b[0]) * r.w, fh = (b[3] - b[1]) * r.h;
+  Object.assign($("scan-frame").style, { left: fx + "px", top: fy + "px", width: fw + "px", height: fh + "px" });
+  $("scan-tag").textContent = stage === "CENTERING" ? "◎ Centering on the bottle"
+    : stage === "READING" ? "▮▮▮ Reading the EAN code…" : "✓ Deposit bottle · +" + money(script.amount);
+  drawBars(script.ean);
+  const shown = stage === "READING" ? Math.ceil(Math.min(1, Math.max(0, (since - script.centering_s) / script.reading_s)) * 13) : 13;
+  $("digits").textContent = script.ean.slice(0, shown) + "·".repeat(13 - shown);
+  $("pname").textContent = script.name;
+  const cw = 230, right = fx + fw + 14;  // the read barcode next to the bottle, inside the picture
+  const cx = right + cw < r.x + r.w ? right : Math.max(r.x + 8, fx - cw - 14);
+  Object.assign($("scan-code").style, { left: cx + "px", top: Math.min(Math.max(fy + fh * 0.3, r.y + 8), r.y + r.h - 130) + "px" });
+}
+requestAnimationFrame(drawScript);
 refresh();
 
 // full screen: button or F; the cursor hides after 3 s without movement
