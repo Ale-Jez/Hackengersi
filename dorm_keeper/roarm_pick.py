@@ -707,7 +707,8 @@ PROGRESS_FILE = os.path.join(_dir, "pick_progress.json")  # which step of the se
 
 
 def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool_wait_s=600.0):
-    """Taught pick: the saved poses one after another (cfg "sequence", else the order they were saved in).
+    """Taught pick: the saved poses one after another (cfg "sequence", else the order they were saved in, starting
+    and ending at "rest" - the arm finishes where it started).
 
     Progress is written after every reached pose, so a failed run continues AT the failed step next time (or right
     away: a timed-out move is retried `retries` times; overheat / RoArm not answering -> wait until it cools down /
@@ -715,6 +716,8 @@ def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool
     progress_file = progress_file or PROGRESS_FILE
     poses = cfg.get("poses") or {}
     sequence = cfg.get("sequence") or list(poses)
+    if not cfg.get("sequence") and "rest" in poses:
+        sequence = ["rest"] + [n for n in sequence if n != "rest"] + ["rest"]
     missing = [n for n in sequence if n not in poses]
     if not sequence or missing:
         raise RuntimeError(f"sequence {sequence}: missing poses {missing}" if missing else "no poses saved")
@@ -896,10 +899,11 @@ def test():
             except TimeoutError:
                 pass
             assert reached == ["rest", "aim"] and json.load(open(prog))["next"] == 2, reached
-            assert play(arm2, pcfg, log=lambda *_: None, progress_file=prog) and reached == ["rest", "aim", "grip", "lift"]
+            assert play(arm2, pcfg, log=lambda *_: None, progress_file=prog)
+            assert reached == ["rest", "aim", "grip", "lift", "rest"], reached  # ends where it started
             fail["aim"] = 1  # one timeout is retried on the spot
             assert play(arm2, pcfg, log=lambda *_: None, progress_file=prog)
-            assert reached[-4:] == ["rest", "aim", "grip", "lift"], reached
+            assert reached[-5:] == ["rest", "aim", "grip", "lift", "rest"], reached
         finally:
             globals()["go_pose"] = orig_go_pose
         # rest pose: lift first (world up), then the saved joint angles
