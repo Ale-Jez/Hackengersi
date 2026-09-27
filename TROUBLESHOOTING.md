@@ -22,7 +22,7 @@
 | USB serial not found | `ls /dev/ttyACM*` or `ls /dev/ttyUSB*`. Try unplugging/replugging. Check `dmesg`. |
 | Servo jitters or doesn't move | Calibrate with `lerobot-calibrate` or `pi_servo_studio.py`. Check 30% torque cap. |
 | Camera image is black | Run `v4l2-ctl --list-devices` to find the right index. Set it in `config.json → camera`. |
-| "pozycja M nie ustawiona" | Press `M` in the web UI (`http://<pi>:8765/`) to save the home/look pose. |
+| "pozycja M nie ustawiona" | Press `M` in the SO-101 page (`http://<pi>:8765/so101`) to save the home/look pose. |
 | Barcode not reading | Ensure good lighting. Clean camera lens. Try rotating the bottle (the arm does this automatically up to 3 times). |
 
 ## 🚗 CubeBot / Driving Base

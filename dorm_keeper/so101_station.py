@@ -1062,8 +1062,7 @@ button:active,button.on{background:#0a6ebd}#stop{background:#8a1c1c}
 h3{margin:12px 0 6px;font-size:13px;color:#aaa;text-transform:uppercase}
 label{display:grid;grid-template-columns:1fr 48px;font-size:13px;margin:2px 0}input{grid-column:1/3}
 small{color:#888}</style></head><body><main><div><img src="/preview" alt="camera preview">
-<small>The keyboard works like in the window: W/S R/F A/D J/L U/O, 1/2/3, B stop, T tracking, G basket/bottle, M, H, Y, Enter</small>
-<p><a href="/roarm_panel" style="color:#4cc2ff">RoArm control (grip teaching, bottle collecting) &rarr;</a></p></div>
+<small>The keyboard works like in the window: W/S R/F A/D J/L U/O, 1/2/3, B stop, T tracking, G basket/bottle, M, H, Y, Enter</small></div>
 <div><div id="result">...</div><div class="p"><button id="rot">Rotated</button><button data-k="t" id="tr">Tracking</button>
 <button data-k="g" id="bk">G follow basket</button>
 <button data-k="b" id="stop">STOP</button></div>
@@ -1201,11 +1200,65 @@ def _bottle_data():
     return view
 
 
+# --- scripted presentation: once AUTO is started in the RoArm panel, the /demo view plays a fixed story ---------
+# searching -> (SO-101 sees the bottle) centering at once -> reading the code after DEMO_CENTERING_S -> result after
+# DEMO_READING_S more: deposit bottle DEMO_NAME, +DEMO_AMOUNT PLN. Before the first AUTO the view shows the real state.
+DEMO_EAN = "8445291856035"
+DEMO_NAME = "Nałęczowianka – woda mineralna niegazowana"
+DEMO_AMOUNT = 0.50
+DEMO_CENTERING_S = 1.0
+DEMO_READING_S = 1.0
+_script = {"on": False, "seen": None, "counted": False, "box": None, "results": []}
+
+
+def _largest_bottle_box():
+    """The biggest bottle the network sees now, as fractions of the frame [x0, y0, x1, y1] (for the /demo overlay)."""
+    view = _web.get("view") or {}
+    w, h, bottles = view.get("width"), view.get("height"), view.get("bottles") or []
+    if not (w and h and bottles):
+        return None
+    x0, y0, x1, y1 = max((b["box"] for b in bottles), key=lambda b: (b[2] - b[0]) * (b[3] - b[1]))
+    return [round(x0 / w, 4), round(y0 / h, 4), round(x1 / w, 4), round(y1 / h, 4)]
+
+
+def demo_script(event):
+    """From AUTO (roarm_pick.auto): "start" = stage 1 again, "seen" = the SO-101 sees the bottle (the clock starts)."""
+    if event == "start":
+        _script.update(on=True, seen=None, counted=False, box=None)
+    elif event == "seen" and _script["on"] and _script["seen"] is None:
+        _script.update(seen=time.time(), box=_largest_bottle_box())
+
+
+def _scripted(data):
+    """/demo data with the scripted story on top (unchanged before the first AUTO)."""
+    s = _script
+    if not s["on"]:
+        return data
+    stage, since = "SEARCHING", None
+    if s["seen"] is not None:
+        since = time.time() - s["seen"]
+        stage = ("CENTERING" if since < DEMO_CENTERING_S else
+                 "READING" if since < DEMO_CENTERING_S + DEMO_READING_S else "RESULT")
+    if stage == "RESULT" and not s["counted"]:  # the bottle counts once, when its result first shows
+        s["counted"] = True
+        s["results"].append({"time": time.strftime("%H:%M:%S"), "code": DEMO_EAN, "name": DEMO_NAME,
+                             "result": "DEPOSIT", "amount": DEMO_AMOUNT, "currency": "PLN"})
+    last = s["results"][-1] if s["results"] else None
+    n = len(s["results"])
+    data.update(inspection=dict(last, state="RESULT") if stage == "RESULT" else {"state": stage}, last_result=last,
+                history=s["results"][-12:][::-1],
+                counter={"bottles": n, "deposit": n, "no_deposit": 0, "total": round(n * DEMO_AMOUNT, 2)},
+                script={"stage": stage, "since": since, "box": _largest_bottle_box() or s["box"], "ean": DEMO_EAN,
+                        "name": DEMO_NAME, "amount": DEMO_AMOUNT, "centering_s": DEMO_CENTERING_S,
+                        "reading_s": DEMO_READING_S})
+    return data
+
+
 def _demo_data():
     """Everything for the /demo view: stage, result, what the network sees, history and bottle counters."""
     results = list(state.get("results", {}).values())  # the last result of each bottle
     deposit = [r for r in results if r["result"] == "DEPOSIT"]
-    return {
+    return _scripted({
         "inspection": state.get("inspection") or {"state": "SEARCHING"},
         "last_result": state.get("last_result"),
         "history": state.get("history", [])[-12:][::-1],
@@ -1216,7 +1269,7 @@ def _demo_data():
         "yolo": _web.get("yolo", "local"), "yolo_fps": _remote["fps"], "laptop": yolo_laptop_active(),
         "roarm": (_web.get("roarm") or {}).get("text") if time.time() - (_web.get("roarm") or {}).get("t", 0) < 90
         else None,
-    }
+    })
 
 
 def http_server(arm):
@@ -1268,8 +1321,15 @@ def http_server(arm):
             # always read the body - on a kept-alive connection it would otherwise be taken as "the next request"
             length = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(length) if length > 0 else b""
-            if url.path == "/":
-                page = PANEL_HTML.encode()
+            if url.path == "/":  # the RoArm panel is the main (admin) page
+                self.send_response(302)
+                self.send_header("Location", "/roarm_panel")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            elif url.path == "/so101":  # SO-101 camera arm page
+                import roarm_panel
+
+                page = roarm_panel.with_menu(PANEL_HTML.encode(), url.path)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(page)))
@@ -1300,6 +1360,9 @@ def http_server(arm):
                         page = f.read()
                 except FileNotFoundError:
                     return self._json({"error": "demo.html missing next to so101_station.py"}, 404)
+                import roarm_panel
+
+                page = roarm_panel.with_menu(page, url.path)
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(page)))
@@ -1307,6 +1370,9 @@ def http_server(arm):
                 self.wfile.write(page)
             elif url.path == "/data":
                 self._json(_demo_data())
+            elif url.path == "/demo_script" and q.get("event") in ("start", "seen"):  # AUTO drives the /demo story
+                demo_script(q["event"])
+                self._json({"ok": True})
             elif url.path == "/system":  # CPU, RAM, Pi temperature + SO-101 servo temperatures
                 self._json(_system_status())
             elif url.path == "/bottles":  # RoArm: where the bottles stand (pixels) + whether the camera is in the look pose
@@ -2908,9 +2974,9 @@ def camera_mode(port=None, mock=False):
     print(f"READY. Signal from the RoArm: http://{my_ip()}:{HTTP_PORT}/scan")
     title = "SO-101 Arm"
     panel = f"http://{my_ip()}:{HTTP_PORT}/"
-    print(f"Presentation view: {panel}demo")
+    print(f"Presentation view: {panel}demo | RoArm panel (main): {panel}roarm_panel")
     if HEADLESS:
-        print(f"No window - panel in the browser: {panel}")
+        print(f"No window - SO-101 panel in the browser: {panel}so101")
         show_help = False  # the keys are on the page
     else:
         print("Click the camera window and steer:\n" + HELP)

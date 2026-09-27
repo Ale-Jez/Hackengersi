@@ -16,7 +16,7 @@
 - [ ] `python main.py selftest` passes on Pi #1
 - [ ] `python drive.py selftest` passes on Pi #2
 - [ ] `python vision.py ping` returns OK (Brev connection)
-- [ ] `so101_station.py` web UI accessible at `http://malina:8765/`
+- [ ] `so101_station.py` web UI accessible at `http://malina:8765/so101` (main page: `/roarm_panel`)
 - [ ] `stream.py` live camera at `http://malina-auto:8000/` (useful for tuning)
 
 ### Calibration

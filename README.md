@@ -84,7 +84,7 @@ A cloud GPU (**Nvidia Brev**) runs a **Qwen2.5-VL-7B** vision-language model tha
 │
 ├── dorm_keeper/          # SO-101 camera station + RoArm picking
 │   ├── so101_station.py  # SO-101 all-in-one: camera, YOLO detection, barcode reading,
-│   │                     #   arm tracking, web UI (http://<IP>:8765/), Xbox controller
+│   │                     #   arm tracking, web UI (http://<IP>:8765/so101), Xbox controller
 │   ├── roarm_pick.py     # Camera → RoArm calibration (AprilTag / VLM) and grab
 │   ├── roarm_panel.py    # RoArm control page (http://<IP>:8765/roarm_panel):
 │   │                     #   per-joint jog, hold-to-move, servo temperature & load,

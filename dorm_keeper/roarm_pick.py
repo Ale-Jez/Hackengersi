@@ -1,7 +1,7 @@
 """RoArm picks what the SO-101 camera sees: camera pixel -> RoArm x, y (homography from calibration) -> grab.
 
 Setup (once):
-  - SO-101 panel (http://<pi>:8765/): aim the camera at the pick area -> key M (look pose)
+  - SO-101 panel (http://<pi>:8765/so101): aim the camera at the pick area -> key M (look pose)
   - python roarm_pick.py calibrate tag: AprilTag 0 (AprilTags/) on the gripper, the RoArm placed (panel) so the camera
     sees the tag, 3-5 cm above the floor. The RoArm finds the floor, then puts the gripper at a small grid of points
     around that spot; the camera finds the tag -> pixel -> RoArm x, y. Measure tag_mm, tag_above_tip_mm and
@@ -244,6 +244,13 @@ class SO101:
     def pose(self, name):
         """SO-101 to its saved pose `name` (e.g. "away")."""
         self._get("/so101_pose", name=name)
+
+    def demo(self, event):
+        """The scripted /demo story: "start" (searching) / "seen" (bottle seen). Network errors do not matter."""
+        try:
+            self._get("/demo_script", event=event)
+        except requests.RequestException:
+            pass
 
     def status(self, text):
         """RoArm status line in the /demo view (network errors do not matter)."""
@@ -749,6 +756,15 @@ def go_pose(arm, cfg, name, timeout=25.0, stop=None):
 PROGRESS_FILE = os.path.join(_dir, "pick_progress.json")  # which step of the sequence is next (survives a crash)
 
 
+def sequence_of(cfg):
+    """The pick route: cfg "sequence", else the poses in the order they were saved, starting and ending at "rest"."""
+    poses = cfg.get("poses") or {}
+    sequence = cfg.get("sequence") or list(poses)
+    if not cfg.get("sequence") and "rest" in poses:
+        sequence = ["rest"] + [n for n in sequence if n != "rest"] + ["rest"]
+    return sequence
+
+
 def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool_wait_s=600.0, stop=None):
     """Taught pick: the saved poses one after another (cfg "sequence", else the order they were saved in, starting
     and ending at "rest" - the arm finishes where it started).
@@ -758,9 +774,7 @@ def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool
     answers again, then the same step). restart=True starts from the first pose. Returns True when all are done."""
     progress_file = progress_file or PROGRESS_FILE
     poses = cfg.get("poses") or {}
-    sequence = cfg.get("sequence") or list(poses)
-    if not cfg.get("sequence") and "rest" in poses:
-        sequence = ["rest"] + [n for n in sequence if n != "rest"] + ["rest"]
+    sequence = sequence_of(cfg)
     missing = [n for n in sequence if n not in poses]
     if not sequence or missing:
         raise RuntimeError(f"sequence {sequence}: missing poses {missing}" if missing else "no poses saved")
@@ -830,6 +844,32 @@ def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool
     return True
 
 
+def mission_paused(progress_file=None):
+    """True when a sequence was stopped before its end (Stop or a failure; Play pick would continue it) - the panel
+    then offers Continue / Abort. A finished run (next == len) or an aborted one (no file) is not paused."""
+    try:
+        with open(progress_file or PROGRESS_FILE, encoding="utf-8") as f:
+            saved = json.load(f)
+        return 0 <= saved["next"] < len(saved["sequence"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def abort(arm, so, cfg, log=print, progress_file=None):
+    """Abort the stopped mission in total: the progress is forgotten (the next Play pick starts from the first pose),
+    the RoArm goes to its rest pose, then the SO-101 to its M pose with tracking off. RoArm first: it clears the
+    table before the camera arm swings in; if it can't reach rest, the SO-101 stays put (error raised)."""
+    progress_file = progress_file or PROGRESS_FILE
+    if os.path.exists(progress_file):
+        os.remove(progress_file)
+    log("mission aborted - progress cleared, RoArm to rest...")
+    go_rest(arm, cfg)
+    log("RoArm at rest - SO-101 to its M pose...")
+    so.tracking(False)
+    so.look(force=True)  # force: the SO-101 may be at its "away" pose, far from M
+    log("aborted: RoArm at rest, SO-101 at M")
+
+
 def wait_for_bottle(so, stop=None, min_conf=0.7, poll=0.1):
     """Until YOLO sees a bottle with confidence >= min_conf - once is enough. Returns that detection."""
     while True:
@@ -849,12 +889,14 @@ def auto(arm, so, cfg, log=print, stop=None, cycles=1, progress_file=None):
     SO-101 back at M and after_pick_s between picks). The sequence resumes at a failed step."""
     done = 0
     while cycles is None or done < cycles:
+        so.demo("start")  # /demo: stage 1 searching (the scripted presentation runs only in AUTO)
         so.tracking(False)  # the camera must not follow the bottle into the RoArm's path
         so.look(force=True)  # M pose - also when it comes from "away" (far from M)
         wait_for_look(so, stop=stop)
         so.status("waiting for a bottle")
         log("SO-101 at M - waiting for a bottle...")
         seen = wait_for_bottle(so, stop, cfg["detect_conf"])
+        so.demo("seen")  # /demo: centering now, reading the code after 1 s, the result after 1 s more
         log(f"bottle detected ({seen['conf']:.0%}) - RoArm starts in {cfg['detect_s']:.0f} s")
         so.status("bottle detected")
         deadline = time.monotonic() + cfg["detect_s"]
@@ -895,6 +937,9 @@ def test():
 
         def status(self, t):
             self.texts.append(t)
+
+        def demo(self, event):
+            self.demo_events = getattr(self, "demo_events", []) + [event]
 
         def frame(self):
             return b"", 640, 360
@@ -1035,6 +1080,7 @@ def test():
             n = auto(arm2, aso, dict(pcfg, detect_s=0.2, after_pick_s=0), log=lambda *_: None, cycles=1,
                      progress_file=os.path.join(tempfile.mkdtemp(), "p.json"))
             assert n == 1 and aso.calls == ["look", "pose:away"], aso.calls  # one bottle, then AUTO ends
+            assert aso.demo_events == ["start", "seen"], aso.demo_events  # /demo story: searching, bottle seen
             assert reached == ["rest", "aim", "grip", "lift", "rest"] and aso.tracks is False, reached
         finally:
             globals()["go_pose"] = orig_go_pose
@@ -1044,6 +1090,26 @@ def test():
         arm2.fb.update(x=200.0, y=0.0, z=50.0, tit=1.57, r=0.0, g=3.0)
         go_rest(arm2, dict(cfg, rest={"b": 0.79, "s": 0.0, "e": 2.06, "t": 1.46, "r": -3.1, "g": 3.1}))
         assert sent[-1]["T"] == 102 and sent[-1]["elbow"] == 2.06 and arm2.fb["z"] == 50.0 + cfg["approach_mm"], sent
+
+        # abort after a stop: paused mission -> progress gone (next Play from the start), RoArm rest, then SO-101 to M
+        prog = os.path.join(tempfile.mkdtemp(), "progress.json")
+        with open(prog, "w") as f:
+            json.dump({"sequence": ["rest", "aim", "rest"], "next": 1}, f)
+        assert mission_paused(prog)
+        sent.clear()
+        aso = AutoSO()
+        abort(arm2, aso, dict(cfg, rest={"b": 0.79, "s": 0.0, "e": 2.06, "t": 1.46, "r": -3.1, "g": 3.1}),
+              log=lambda *_: None, progress_file=prog)
+        assert not os.path.exists(prog) and not mission_paused(prog) and sent[-1]["T"] == 102, sent
+        assert aso.calls == ["look"] and aso.tracks is False, aso.calls
+        with open(prog, "w") as f:
+            json.dump({"sequence": ["rest", "aim", "rest"], "next": 3}, f)  # finished run: nothing to abort
+        assert not mission_paused(prog)
+        with open(prog, "w") as f:
+            json.dump({"sequence": ["rest", "aim", "rest"], "next": 0}, f)  # stopped before the first pose
+        assert mission_paused(prog)
+        assert sequence_of({"poses": {"aim": 1, "rest": 2}}) == ["rest", "aim", "rest"]
+        assert sequence_of({"poses": {"aim": 1}, "sequence": ["aim"]}) == ["aim"]
 
         # kinematics: RoArm feedback 2026-09-27 (b s e t) -> z 270 mm; ik(fk(q)) returns to the same elbow branch
         x, y, z, tit = fk(2.37, 0.26, 0.17, 1.56)

@@ -4,7 +4,7 @@ The code lands in ~/dorm_keeper on the Pi - separate from the team repo (~/Hacke
 conflicts. Poses, the deposit list, history and calibration on the Pi are NOT overwritten (they may be newer there).
 
 The SO-101 with the camera runs on the Pi as the "dorm-keeper" service (so101_station.py without a window,
-panel http://malina.local:8765/). YOLO on the Pi gives ~10 fps - faster when yolo_laptop.py runs elsewhere.
+panel http://malina.local:8765/roarm_panel, SO-101 page /so101). YOLO on the Pi gives ~10 fps - faster when yolo_laptop.py runs elsewhere.
 
     python deploy_to_pi.py              deploy; if the service is enabled - restart it
     python deploy_to_pi.py --autostart  enable the service (also after a Pi reboot) and start it
@@ -131,7 +131,7 @@ systemctl --user restart dorm-keeper
 for i in $(seq 40); do  # wait until the arm, camera and YOLO are up
   sleep 1
   if curl -sf -m 2 localhost:8765/status >/dev/null; then
-    echo "RUNNING: panel http://$(hostname).local:8765/  (or http://$(hostname -I | cut -d' ' -f1):8765/)"
+    echo "RUNNING: panel http://$(hostname).local:8765/roarm_panel  (or http://$(hostname -I | cut -d' ' -f1):8765/roarm_panel)"
     exit 0
   fi
 done
