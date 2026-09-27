@@ -733,6 +733,15 @@ def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool
         with open(progress_file, "w", encoding="utf-8") as f:
             json.dump({"sequence": sequence, "next": nxt, "t": time.time()}, f)
 
+    if not arm.mock:
+        w = arm.where()
+        if (w.get("v") or 0) < 100:  # 0.01 V units: no servo power - never wait for it (power-on must not swing the arm)
+            raise RuntimeError("RoArm servo power is off (0 V) - switch it on, then run play again")
+        if not any(w.get(k) for k in ("torswitchB", "torswitchS", "torswitchE")):  # motors off: on, where it stands
+            hold_here(arm, w)
+            arm.send({"T": 210, "cmd": 1})
+            time.sleep(1.0)
+
     while step < len(sequence):
         name = sequence[step]
         save(step)  # a crash from here on resumes at this step
@@ -749,6 +758,9 @@ def play(arm, cfg, restart=False, log=print, progress_file=None, retries=2, cool
                     raise
                 log(f"  did not reach {name} ({e}) - retry {failures}/{retries}")
             except Overheat as e:
+                if arm.volts is not None and arm.volts < 1.0:  # servo power off: stop, never resume on power-on
+                    raise RuntimeError(f"RoArm servo power went off at step {step + 1} ({name}) - switch it on, "
+                                       "check the arm, then run play again") from e
                 log(f"  {e} - waiting for it to cool down, then {name} again")
                 deadline = time.monotonic() + cool_wait_s
                 while True:
