@@ -13,6 +13,7 @@ A two-wheel car (Raspberry Pi 5, two MAB GL40 wheel drives on a CANdle USB dongl
 | `drive.py` | Building blocks: `approach()` (steer to a tag, stop at `stop_px`), `timed()` (blind timed move with obstacle stop), `Guard`, `run()` for the `route` in config |
 | `course.py` | Fixed course: 1 m forward, right 90°, 0.5 m forward, left 90°, then drive at tag 1 and stop 15 cm from it |
 | `stream.py` | Live camera view at `http://<pi>:8000` |
+| `app.py` | Station panel at `http://<pi>:8000` (buttons per station, manual driving, taught routes, 90° turns, CANdle auto-reconnect). Owns the camera and the CANdle while it runs |
 | `config.json` | Every tunable number. Code never hard-codes a calibration value |
 
 ## The Pi
@@ -23,8 +24,8 @@ A two-wheel car (Raspberry Pi 5, two MAB GL40 wheel drives on a CANdle USB dongl
 - SSH uses key auth from the dev laptop (`ssh hackengersi@192.168.32.144`). **Never write passwords (Pi login or WiFi) into any file in this repo.** Ask the user for them.
 - Not the same machine as `malina` (192.168.32.114), the other Pi that runs the arm / SO-101 station. Don't deploy there.
 - Code lives in `~/Raspberry-Auto` with a venv in `~/Raspberry-Auto/.venv` (system site packages: apt OpenCV + picamera2; `candlesdk`/`pyCandle` built from `~/CANdle-SDK`). Always run with `.venv/bin/python`.
-- Pi-only files that are not in git and must not be overwritten or deleted: `.venv/`, `floor.npy` (learned floor colour), `*.jpg`, `*.log`.
-- Only one process can open the camera. Stop `stream.py` before running `drive.py` / `course.py`.
+- Pi-only files that are not in git and must not be overwritten or deleted: `.venv/`, `floor.npy` (learned floor colour), `routes.json` (taught routes), `where.json` (station the car stands at), `calib.json` (measured 90° turn), `*.jpg`, `*.log`.
+- Only one process can open the camera (and the CANdle). Stop `app.py` / `stream.py` before running `drive.py` / `course.py` / `motors.py`, and check the panel is not driving or teaching (`/status`) before restarting it.
 - Shut down with `sudo poweroff` before cutting power (a hard cut once corrupted an SD card).
 
 ## Deploy
@@ -44,6 +45,7 @@ Before overwriting, compare `config.json` with the Pi's copy. Values tuned on th
 .venv/bin/python motors.py ping      # CANdle + drives visible? (lsusb should show 0069:1000)
 .venv/bin/python course.py           # the fixed course
 .venv/bin/python drive.py tag 1      # just drive to tag 1
+.venv/bin/python app.py              # the station panel (keep it running: nohup / setsid)
 MOCK=1 python drive.py selftest      # no hardware, runs anywhere
 ```
 

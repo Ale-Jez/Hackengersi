@@ -8,7 +8,9 @@ Behaviour
   steering   hybrid: small heading error -> arc, both wheels forward and the inner one slowed;
              big error -> spin in place (wheels opposite). Hysteresis between the two.
   approach   drive at the tag, slow down as it grows, stop when it looks stop_px wide.
-  lost tag   stop, spin in place toward the side it was last seen, give up after search_timeout.
+  lost tag   gone for less than lost_grace_s: keep going. Longer: stop, then turn toward the side it was
+             last seen in steps (search_step_s turning, search_look_s still), give up after one full turn
+             (wheel encoders, track_m / wheel_radius_m) or search_timeout.
   obstacle   the corridor in front stops looking like floor for obstacle_frames frames -> halt
              (no ramp) and wait until it is clear again; give up after obstacle_timeout.
              Off during the final slow_px of a tag approach (the tag's station fills the corridor).
@@ -18,6 +20,7 @@ Route steps:  {"tag": 1, "stop_px": 150}       drive to AprilTag 1 until it look
               {"wait": seconds}
               {"cmd": "shell command"}         run it and wait, e.g. the arm Pi's sort cycle over ssh
 """
+import math
 import subprocess
 import sys
 import time
@@ -63,50 +66,100 @@ class Guard:
         return self.stopped_at is not None
 
 
-def approach(cfg, cam, wheels, guard, tag_id, stop_px, timeout=90):
+class Aborted(Exception):
+    """The STOP button (abort event) was pressed."""
+
+
+def _check_abort(abort, wheels):
+    if abort is not None and abort.is_set():
+        wheels.halt()
+        raise Aborted()
+
+
+def approach(cfg, cam, wheels, guard, tag_id, stop_px, timeout=90, abort=None, search_side=-1):
+    """Drive to tag_id, or to any one of a list of ids (a station with several tags): the first one
+    seen (the biggest if several) is kept for the whole approach, so the car never swaps targets midway.
+    search_side: which way to turn if no tag is in view before one was ever seen (-1 left, +1 right)."""
+    ids = [tag_id] if isinstance(tag_id, int) else list(tag_id)
+    locked = None
+    name = lambda: str(locked) if locked is not None else "/".join(map(str, ids))
     end = time.monotonic() + timeout
-    pivoting, last_side, lost_at, searching = False, -1, None, False
+    # slow-down zone: slow_frac of stop_px when set (scales with the stop distance), else slow_px
+    slow_px = cfg["slow_frac"] * stop_px if "slow_frac" in cfg else cfg["slow_px"]
+    pivoting, last_side, lost_at, searching, search_t0 = False, search_side, None, False, 0.0
+    step, look = cfg.get("search_step_s", 0), cfg.get("search_look_s", 0)
+    # one full turn in place = each wheel rolls a whole circle of radius track/2: searching longer only repeats it
+    full_turn = 2 * math.pi * cfg["track_m"] / 2 / cfg["wheel_radius_m"] if cfg.get("track_m") and cfg.get("wheel_radius_m") else None
+    search_pos = None
+    last_tag, logged = None, 0.0
     while time.monotonic() < end:
+        _check_abort(abort, wheels)
         img = cam.frame()
         tags = find_tags(img)
-        tag = tags.get(tag_id)
+        if locked is None:
+            seen = [i for i in ids if i in tags]
+            locked = max(seen, key=lambda i: tags[i][2]) if seen else None
+        tag = tags.get(locked)
         # final slow approach: whatever the tag hangs on fills the corridor, that's the goal, not an obstacle
-        docking = tag is not None and tag[2] >= stop_px - cfg["slow_px"]
+        docking = tag is not None and tag[2] >= stop_px - slow_px
         if not docking and guard.check(img, [t[3] for t in tags.values()]):
             continue
         if tag is None:
+            now = time.monotonic()
             if lost_at is None:
-                lost_at = time.monotonic()
-                print(f"  tag {tag_id} not in view: stop, then search {'right' if last_side > 0 else 'left'}")
-            if time.monotonic() - lost_at > cfg["search_timeout"]:
+                lost_at = now
+            if now - lost_at < cfg.get("lost_grace_s", 0) and not pivoting:
+                continue  # a few missed frames (motion blur, a far tag): keep driving as before, but never keep spinning
+            if now - lost_at > cfg["search_timeout"]:
                 break
             if not searching:
                 if not wheels.still():
                     wheels.set(0, 0)  # brake to a standstill first, then spin
                     continue
-                searching = True
+                if last_tag is not None:
+                    x0, y0, x1, y1 = last_tag[3]
+                    h, margin = img.shape[0], 0.06 * img.shape[0]
+                    if y0 < margin or y1 > h - margin:
+                        # it left through the top or bottom: turning cannot bring it back
+                        where = "top" if y0 < margin else "bottom"
+                        raise TimeoutError(f"tag {name()} left the {where} of the image at {last_tag[2]:.0f} px: "
+                                           f"hang it at the camera's height")
+                print(f"  tag {name()} not in view: search {'right' if last_side > 0 else 'left'}")
+                searching, search_t0, search_pos = True, now, list(wheels.pos)
+            turned = abs((wheels.pos[0] - search_pos[0]) - (wheels.pos[1] - search_pos[1])) / 2
+            if full_turn and turned >= full_turn:
+                wheels.set(0, 0)
+                raise TimeoutError(f"tag {name()} not in view after a full turn")
             s = cfg["search_speed"] * last_side
-            wheels.set(s, -s)
+            # in steps: turn a little, then stand still and look. A spinning camera blurs a small tag away.
+            turning = not step or (now - search_t0) % (step + look) < step
+            wheels.set(s, -s) if turning else wheels.set(0, 0)
             continue
-        lost_at, searching = None, False
-        cx, _, side, _ = tag
+        lost_at, searching, last_tag = None, False, tag
+        cx, cy, side, _ = tag
         if side >= stop_px:
             wheels.set(0, 0)
+            print(f"  tag {name()}: {side:.0f} px >= {stop_px:.0f}: arrived")
             return
         err = (cx - img.shape[1] / 2) / (img.shape[1] / 2)
         last_side = 1 if err > 0 else -1
         # full speed far away, down to min_speed over the last slow_px of growth
-        v = cfg["drive_speed"] * max(cfg["min_speed"], min(1.0, (stop_px - side) / cfg["slow_px"]))
+        v = cfg["drive_speed"] * max(cfg["min_speed"], min(1.0, (stop_px - side) / slow_px))
         (left, right), pivoting = mix(cfg, v, err, pivoting)
         wheels.set(left, right)
+        if time.monotonic() - logged > 0.5:  # a trace in the log, to see afterwards what the car saw and did
+            logged = time.monotonic()
+            print(f"  tag {name()}: {side:.0f} px at x={cx:.0f} y={cy:.0f} err={err:+.2f} -> "
+                  f"{'spin' if pivoting else 'arc'} L={left:+.2f} R={right:+.2f}")
     wheels.set(0, 0)
-    raise TimeoutError(f"tag {tag_id} not reached")
+    raise TimeoutError(f"tag {name()} not reached")
 
 
-def timed(cam, wheels, guard, left, right, secs):
+def timed(cam, wheels, guard, left, right, secs, abort=None):
     """Blind move; forward moves still stop for obstacles (the paused time doesn't count)."""
     left_s = secs
     while left_s > 0:
+        _check_abort(abort, wheels)
         t = time.monotonic()
         if left > 0 and right > 0 and guard.check(cam.frame()):
             continue
@@ -166,7 +219,9 @@ def selftest():
         def frame(self):
             return self.frames.pop(0)
 
-    cfg.update(obstacle_frames=2, search_timeout=5, slow_px=80)  # the 64 px tag must be outside the docking zone
+    # pinned: the 64 px tag must be outside the docking zone, and the red box (~60% of the corridor) must stop the car
+    cfg.update(obstacle_frames=2, search_timeout=5, slow_px=80, obstacle_frac=0.35, obstacle_check=True, lost_grace_s=0)
+    cfg.pop("slow_frac", None)
     wheels = Wheels(cfg, mock=True)
     guard = Guard(cfg, wheels)
     guard.obs.hist = None  # learn from the first (clear) test frame, not a floor.npy lying around

@@ -21,6 +21,24 @@ PAGE = b"""<!doctype html><meta name=viewport content="width=device-width,initia
 <img src="/stream" style="width:100%;max-width:960px;display:block;margin:auto"></body>"""
 
 
+def annotate(img, cfg, obs, seen):
+    """Tags (id, px, distance), the obstacle corridor and the detection rate over `seen` (a deque)."""
+    f, size = cfg.get("tag_focal_px"), cfg.get("tag_size_cm", 6.0)
+    tags = vision.find_tags(img)
+    seen.append(1 if tags else 0)
+    out = vision.draw(img, tags, obs if cfg.get("obstacle_check", True) else None)
+    y = 30
+    for i, (cx, cy, side, _) in sorted(tags.items()):
+        dist = f" ~{f * size / side:.0f} cm" if f else ""
+        cv2.putText(out, f"tag {i}: {side:.0f}px{dist}", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        y += 30
+    if not tags:
+        cv2.putText(out, "no tag", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+    cv2.putText(out, f"seen {sum(seen) / len(seen):.0%} of last {len(seen)} frames", (10, out.shape[0] - 12),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+    return out
+
+
 class Feed:
     """Camera -> annotated JPEG, one worker thread; every browser gets the newest JPEG."""
 
@@ -33,23 +51,9 @@ class Feed:
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self):
-        f, size = self.cfg.get("tag_focal_px"), self.cfg.get("tag_size_cm", 6.0)
         while True:
-            img = self.cam.frame()
-            tags = vision.find_tags(img)
-            self.seen.append(1 if tags else 0)
-            out = vision.draw(img, tags, self.obs)
-            y = 30
-            for i, (cx, cy, side, _) in sorted(tags.items()):
-                dist = f" ~{f * size / side:.0f} cm" if f else ""
-                cv2.putText(out, f"tag {i}: {side:.0f}px{dist}", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-                y += 30
-            if not tags:
-                cv2.putText(out, "no tag", (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            rate = sum(self.seen) / len(self.seen)
-            cv2.putText(out, f"seen {rate:.0%} of last {len(self.seen)} frames", (10, out.shape[0] - 12),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 70])
+            ok, buf = cv2.imencode(".jpg", annotate(self.cam.frame(), self.cfg, self.obs, self.seen),
+                                   [cv2.IMWRITE_JPEG_QUALITY, 70])
             if ok:
                 with self.cond:
                     self.jpg = buf.tobytes()

@@ -11,7 +11,13 @@ import cv2
 import numpy as np
 
 FLOOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "floor.npy")
-_detector = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11))
+_local = threading.local()  # one detector per thread: the panel's live view detects next to the driving loop
+
+
+def _detector():
+    if not hasattr(_local, "det"):
+        _local.det = cv2.aruco.ArucoDetector(cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11))
+    return _local.det
 
 
 class Camera:
@@ -32,6 +38,8 @@ class Camera:
                 main={"size": tuple(size), "format": "RGB888"}, transform=Transform(hflip=flip, vflip=flip)))
             if "AfMode" in self.cam.camera_controls:  # Module 3 autofocus is off in video mode: blurry tags
                 self.cam.set_controls({"AfMode": 2})  # 2 = continuous
+            if "AeExposureMode" in self.cam.camera_controls:  # short exposures (more gain): less motion blur
+                self.cam.set_controls({"AeExposureMode": 1})  # 1 = Short
             self.cam.start()
             self._read = lambda: (True, self.cam.capture_array())
         else:
@@ -58,6 +66,13 @@ class Camera:
                     self.img, self.seq = img, self.seq + 1
                     self.cond.notify_all()
 
+    def peek(self):
+        """Newest frame without consuming it (a live view next to the driving loop), None before the first."""
+        if self.mock:
+            return np.full((self.size[1], self.size[0], 3), 128, np.uint8)
+        with self.cond:
+            return self.img
+
     def frame(self):
         if self.mock:
             return np.full((self.size[1], self.size[0], 3), 128, np.uint8)
@@ -70,7 +85,7 @@ class Camera:
 
 def find_tags(img):
     """{tag id: (centre x, centre y, side length px, (x0, y0, x1, y1) box)}."""
-    corners, ids, _ = _detector.detectMarkers(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+    corners, ids, _ = _detector().detectMarkers(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
     out = {}
     for c, i in zip(corners, [] if ids is None else ids.flatten()):
         c = c.reshape(4, 2)
