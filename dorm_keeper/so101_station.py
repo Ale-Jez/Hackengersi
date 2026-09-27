@@ -374,7 +374,7 @@ TRACK_ACC = 15                   # acceleration of tracking moves (less = gentle
 TRACK_LEAD = 0.3                 # s: the servo gets its goal this far ahead -> moves continuously, doesn't stop every frame
 TRACK_AIM_AT_CODE = False        # True = after reading, aim at the code itself (lower; the bottle top may leave the frame)
 TRACK_AIM_HEIGHT = 0.45          # where to aim at the bottle: 0 = top, 0.5 = middle, 1 = bottom (label with the deposit)
-TRACK_ASPECT = {"bottle": 2.8, "can": 1.8}  # height/width - to estimate a cut-off bottle
+TRACK_ASPECT = {"bottle": 2.8, "can": 1.8, "basket": 1.0}  # height/width - to estimate a cut-off bottle
 CUT_MAX = 1.3                    # cut-off bottle: guessed size at most this many times the visible part
 CUT_MAX_SPEED = 12.0             # deg/s: when the bottle sticks out of the frame, the target is only an estimate - move carefully
 CLOSE_FROM = 0.72                # bottle taller than 72% of the frame = right in front of the camera: don't aim vertically (label visible)
@@ -396,6 +396,11 @@ MIN_BOTTLE = 0.12                # bottle lower than 12% of the image height = t
 TRACK_CONFIRM = 3                # in how many consecutive frames the bottle must be visible to catch it
 TRACK_SWITCH_FRAMES = 8          # ... and another bottle must be clearly closer for this many frames (~0.4 s) to switch
 TRACK_DEPOSIT_ONLY = False       # True = track only bottles with a read deposit code
+TRACK_OBJECT = "bottle"          # what the camera keeps centred: "bottle" (YOLO) or "basket" (key G, /track_object)
+# the vehicle's basket: light grey rim + white inside on an orange wooden floor = a large, solid, low-saturation blob
+BASKET_MAX_SAT = 45              # HSV saturation 0..255: at most this (grey/white)
+BASKET_MIN_VAL = 150             # HSV value 0..255: at least this (light)
+BASKET_MIN_AREA = 0.04           # the blob covers at least this part of the image
 READS_PER_SECOND = 5             # how many times per second to read the code (more = faster, but loads the CPU)
 CODE_CONFIRM = 2                 # this many matching EAN reads to accept it (1 wrong read doesn't spoil the result)
 CODE_MISSING_AFTER = 3.0         # s without reading the tracked bottle's code -> "rotate the bottle code to the camera"
@@ -1045,9 +1050,10 @@ button:active,button.on{background:#0a6ebd}#stop{background:#8a1c1c}
 h3{margin:12px 0 6px;font-size:13px;color:#aaa;text-transform:uppercase}
 label{display:grid;grid-template-columns:1fr 48px;font-size:13px;margin:2px 0}input{grid-column:1/3}
 small{color:#888}</style></head><body><main><div><img src="/preview" alt="camera preview">
-<small>The keyboard works like in the window: W/S R/F A/D J/L U/O, 1/2/3, B stop, T tracking, M, H, Y, Enter</small>
+<small>The keyboard works like in the window: W/S R/F A/D J/L U/O, 1/2/3, B stop, T tracking, G basket/bottle, M, H, Y, Enter</small>
 <p><a href="/roarm_panel" style="color:#4cc2ff">RoArm control (grip teaching, bottle collecting) &rarr;</a></p></div>
 <div><div id="result">...</div><div class="p"><button id="rot">Rotated</button><button data-k="t" id="tr">Tracking</button>
+<button data-k="g" id="bk">G follow basket</button>
 <button data-k="b" id="stop">STOP</button></div>
 <h3>Move (hold)</h3><div class="p">
 <button data-h="j">J tilt</button><button data-h="w">W up</button><button data-h="l">L tilt</button>
@@ -1065,7 +1071,7 @@ document.querySelectorAll('[data-h]').forEach(b=>{const c=b.dataset.h;
  b.onpointerdown=e=>{b.setPointerCapture(e.pointerId);press(c)};b.onpointerup=b.onpointercancel=()=>release(c)});
 document.querySelectorAll('[data-k]').forEach(b=>b.onclick=()=>k(b.dataset.k));
 document.getElementById('rot').onclick=()=>fetch('/rotated');
-const MOVE='wsrfadjluo',ACTIONS='123btmhycp';
+const MOVE='wsrfadjluo',ACTIONS='123btmhycpg';
 onkeydown=e=>{if(e.target.tagName=='INPUT')return;const c=e.key.toLowerCase();
  if(MOVE.includes(c)&&c.length==1){press(c);e.preventDefault()}
  else if(ACTIONS.includes(c)&&c.length==1&&!e.repeat)k(c);else if(e.key=='Enter'&&!e.repeat)k('\\r')};
@@ -1079,7 +1085,8 @@ async function refresh(){try{const w=await(await fetch('/result')).json(),e=docu
  e.className=w.state=='RESULT'?(t[w.result]||''):'';
  e.textContent=w.state=='RESULT'?`${w.result}${w.amount!=null?' '+w.amount.toFixed(2)+' '+w.currency:''} ${w.name||w.code||''}`
   :`${w.state}${o.result?' | last: '+o.result+' '+(o.code||''):''}`;
- document.getElementById('tr').classList.toggle('on',!!w.tracking)}catch(e){}setTimeout(refresh,700)}refresh();
+ document.getElementById('tr').classList.toggle('on',!!w.tracking);
+ document.getElementById('bk').classList.toggle('on',w.track_object==='basket')}catch(e){}setTimeout(refresh,700)}refresh();
 </script></body></html>"""
 
 
@@ -1282,6 +1289,9 @@ def http_server(arm):
             elif url.path == "/tracking" and q.get("on") in ("0", "1"):  # RoArm turns tracking on/off
                 _web_keys.put("track" + q["on"])
                 self._json({"ok": True})
+            elif url.path == "/track_object" and q.get("name") in ("bottle", "basket"):  # what the camera follows
+                _web_keys.put("object:" + q["name"])
+                self._json({"ok": True})
             elif url.path == "/look":  # SO-101 goes back to the pose looking at the table (pose from key M)
                 pose, joints = load_json(POSES_FILE, {}).get(HOME_POSE), _web.get("joints") or {}
                 if not pose:
@@ -1342,7 +1352,8 @@ def http_server(arm):
                 self._json(state)
             elif self.path.startswith("/result"):  # bottle inspection result (deposit / none / rotate)
                 self._json(dict(state.get("inspection") or {"state": "no inspection"},
-                                last_result=state.get("last_result"), tracking=_web["tracking"]))
+                                last_result=state.get("last_result"), tracking=_web["tracking"],
+                                track_object=TRACK_OBJECT))
             elif self.path.startswith("/rotated"):  # bottle rotated - read the code again
                 if _inspection:
                     _inspection.after_rotation()
@@ -2381,6 +2392,36 @@ def full_box(bt, cut):
     return x0, y0, x1, y1
 
 
+def find_basket(frame):
+    """The vehicle's basket -> a detection like BottleDetector's (cls "basket") or None.
+
+    No YOLO class for it and the VLM is too slow to steer by, but it is easy to see: the largest solid light-grey/white
+    blob (checked on real frames: found with and without a bottle, the RoArm or the floor in view). ~3 ms at 320 px."""
+    import cv2
+    import numpy as np
+
+    h, w = frame.shape[:2]
+    k = 320 / w
+    small = cv2.resize(frame, (320, max(1, int(h * k))), interpolation=cv2.INTER_AREA)
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    mask = ((hsv[..., 1] <= BASKET_MAX_SAT) & (hsv[..., 2] >= BASKET_MIN_VAL)).astype(np.uint8) * 255
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))    # cables and specks away
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))   # bottle / shadows inside filled
+    best = None
+    for c in cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[0]:
+        area = cv2.contourArea(c)
+        # solid: a white cable loop has a big hull but a small area
+        if area >= BASKET_MIN_AREA * mask.size and area >= 0.6 * cv2.contourArea(cv2.convexHull(c)) \
+                and (best is None or area > best[0]):
+            best = (area, c)
+    if best is None:
+        return None
+    x, y, bw, bh = cv2.boundingRect(best[1])
+    x0, y0, x1, y1 = x / k, y / k, (x + bw) / k, (y + bh) / k
+    return {"cls": "basket", "conf": 1.0, "box": (x0, y0, x1, y1), "cx": (x0 + x1) / 2, "cy": (y0 + y1) / 2,
+            "w": x1 - x0, "h": y1 - y0, "ean": None, "code_xy": None}
+
+
 def aim_point(bt, width, height, cut=None, rel=None):
     """The point on the bottle the arm aims at: the remembered code location (rel) or the middle of the label."""
     if cut is None:
@@ -2616,7 +2657,7 @@ class BottleTracker(Tracker):
                 self._cand = (largest["cx"], largest["cy"])
                 if self._cand_n >= TRACK_CONFIRM:
                     self._nr += 1
-                    self.target, current, self.ean = f"bottle{self._nr}", largest, None
+                    self.target, current, self.ean = f"{largest['cls']}{self._nr}", largest, None
                     self._other_n = 0
                     msg = f"TRACKING {self.target}"
             else:
@@ -2667,11 +2708,13 @@ class BottleTracker(Tracker):
             if 0.0 <= rel[0] <= 1.0 and 0.0 <= rel[1] <= 1.0:
                 k = self.code_rel
                 self.code_rel = rel if k is None else (k[0] + 0.3 * (rel[0] - k[0]), k[1] + 0.3 * (rel[1] - k[1]))
-        px, py = aim_point(current, width, height, self._cut, self.code_rel if TRACK_AIM_AT_CODE else None)
+        basket = current["cls"] == "basket"  # the basket: its middle, not a label height or a code
+        px, py = aim_point(current, width, height, self._cut,
+                           (0.5, 0.5) if basket else (self.code_rel if TRACK_AIM_AT_CODE else None))
         # bottle right in front of the camera (most of the frame height): the label is in the frame anyway, and the guessed
         # center of a cut-off bottle jumps (was: wrist -12 -> +12 deg/s) - stand still vertically, center only horizontally
         h_rel = current["h"] / height
-        self._close = h_rel >= (CLOSE_FROM - 0.12 if getattr(self, "_close", False) else CLOSE_FROM)
+        self._close = not basket and h_rel >= (CLOSE_FROM - 0.12 if getattr(self, "_close", False) else CLOSE_FROM)
         if self._close:
             py = height / 2
         self.point = (px, py)
@@ -2825,8 +2868,10 @@ def camera_mode(port=None, mock=False):
             if frame_nr % 5 == 1:  # sharpness only for the on-screen caption - no need every frame
                 sharp = sharpness(frame)
             bottles = detector.detect(frame, tracking=bool(trk.target), large=trk.size >= YOLO_LARGE_FROM)
+            basket = find_basket(frame) if TRACK_OBJECT == "basket" else None
             # for the RoArm (roarm_pick.py): where the bottles stand in the frame - /bottles
-            _web["view"] = {"width": width, "height": height, "t": t_shot, "bottles": [
+            _web["view"] = {"width": width, "height": height, "t": t_shot,
+                            "basket": [int(v) for v in basket["box"]] if basket else None, "bottles": [
                 {"cls": b["cls"], "conf": round(b["conf"], 3), "cx": round(b["cx"], 1),
                  "cy": round(b["cy"], 1), "box": [int(v) for v in b["box"]]}
                 for b in bottles if b["conf"] >= (BOTTLE_THRESHOLD if b["cls"] == "bottle" else CAN_THRESHOLD)]}
@@ -2874,6 +2919,14 @@ def camera_mode(port=None, mock=False):
                                    cv2.MARKER_TILTED_CROSS, 30, 3)
                 desc = f"{bt['cls']} {bt['conf']:.0%}" + (" DEPOSIT" if deposit else "") + ("  <- TARGET" if is_target else "")
                 cv2.putText(screen, desc, (x0 + 4, max(y0 + 22, 40)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            if basket:  # cyan: the basket the camera keeps centred
+                x0, y0, x1, y1 = (int(v * sk) for v in basket["box"])
+                cv2.rectangle(screen, (x0, y0), (x1, y1), (255, 255, 0), 6 if trk.target else 2)
+                if trk.target and getattr(trk, "point", None):
+                    cv2.drawMarker(screen, (int(trk.point[0] * sk), int(trk.point[1] * sk)), (255, 255, 0),
+                                   cv2.MARKER_TILTED_CROSS, 30, 3)
+                cv2.putText(screen, "basket" + ("  <- TARGET" if trk.target else ""), (x0 + 4, max(y0 + 22, 40)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
             # /demo view: the image with only the boxes (no bars with numbers) + list of detections
             _web["detections"] = [{"cls": b["cls"], "conf": round(b["conf"], 2)} for b in bottles
                                   if b["conf"] >= (BOTTLE_THRESHOLD if b["cls"] == "bottle" else CAN_THRESHOLD)]
@@ -2898,7 +2951,8 @@ def camera_mode(port=None, mock=False):
                 if tracking:
                     had_target = trk.target is not None
                     key_before = trk.ean or trk.target
-                    msg = trk.step(bottles, deposits, width, height, st, frame_t=t_shot)
+                    targets = bottles if TRACK_OBJECT == "bottle" else ([basket] if basket else [])
+                    msg = trk.step(targets, deposits, width, height, st, frame_t=t_shot)
                     # history: a fresh measurement of the tracked bottle (key = EAN, and without a code - the bottle number)
                     if trk.target and trk.xy and now - trk.seen < 0.05:
                         history.update(trk.ean or trk.target, deposits.names.get(trk.ean or "", ""), now,
@@ -2917,7 +2971,9 @@ def camera_mode(port=None, mock=False):
                               f" | goal pan={st.target['pan']:6.1f} wflex={st.target['wflex']:6.1f}")
                     if had_target and trk.target is None and ON_LOSS == "home":
                         run_task(arm, go_home, "home")
-                msg_i = inspection.step(trk, deposits, st, now, tracking and not _busy.is_set())
+                # bottle inspection (read the code, deposit) only while following bottles
+                msg_i = inspection.step(trk, deposits, st, now,
+                                        tracking and not _busy.is_set() and TRACK_OBJECT == "bottle")
                 if msg_i:
                     show(msg_i)
                 pressed = st.step()
@@ -2950,6 +3006,9 @@ def camera_mode(port=None, mock=False):
                 c = _web_keys.get()
                 if c.startswith("track"):
                     new = c == "track1"
+                elif c.startswith("object:"):  # /track_object: follow bottles or the basket
+                    globals()["TRACK_OBJECT"], trk.target = c[7:], None
+                    show(f"camera follows: {TRACK_OBJECT}")
                 elif c not in ("q", "\x1b"):  # the browser doesn't quit the program
                     inputs.append(c)
             if new != tracking:
@@ -2970,6 +3029,10 @@ def camera_mode(port=None, mock=False):
                     continue
                 elif c == "h":
                     run_task(arm, go_home, "home") or show("arm busy")
+                elif c == "g":  # G: follow the (grey) basket <-> bottles
+                    globals()["TRACK_OBJECT"] = "bottle" if TRACK_OBJECT == "basket" else "basket"
+                    trk.target = None
+                    show(f"camera follows: {TRACK_OBJECT}")
                 elif c == "t":
                     tracking, trk.target = not tracking, None
                     if not HEADLESS:
