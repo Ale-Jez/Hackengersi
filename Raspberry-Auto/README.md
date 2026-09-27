@@ -17,6 +17,8 @@ Stations are in `config.json` `stations` (dok = tag 0, biurko = tag 1, sortownia
 
 Teaching: stand the car at the start station, "Ucz trasy", drive with the arrows and the 90° buttons to the target, "Zapisz trasę". Moves made after saving (e.g. turning round to park) are offered to be appended to that route. A 90° turn is `π/2 × (track_m / 2) / wheel_radius_m` of wheel rotation, unless "Kalibruj obrót" measured it (`calib.json`).
 
+For a presentation, `http://<pi ip>:8000/demo` shows only one big button per leg (`demo_legs`, default dok → biurko → sortownia → dok), live only for the leg that starts where the car stands, and a STOP that also resets the car to the first station (`home`) so the run can start over.
+
 If the CANdle drops off USB, the wheels stop, a running trip is aborted and the link is re-attached every second; the panel shows the link state. Only one process can own the camera and the CANdle: stop `app.py` before `stream.py`, `motors.py`, `drive.py` or `course.py`.
 
 ## Behaviour

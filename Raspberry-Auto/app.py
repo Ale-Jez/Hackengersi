@@ -156,6 +156,7 @@ class Car:
         s["calib"] = self.calib is not None
         s["use_tags"] = self.cfg.get("use_tags", True)
         s["motors"] = self.wheels.link_ok
+        s["legs"] = self.cfg.get("demo_legs", [["dok", "biurko"], ["biurko", "sortownia"], ["sortownia", "dok"]])
         return s
 
     def turn90(self):
@@ -205,6 +206,18 @@ class Car:
         with self.mlock:
             self.wheels.set(0, 0)
             self.manual_moving = False
+
+    def stop_home(self):
+        """The presentation STOP: stop, then start over from the first station ("home"), where people carry the car back."""
+        self.stop()
+        if self.trip is not None:
+            self.trip.join(timeout=5)
+        if self.teach is not None or self.calib is not None:
+            return None  # teaching or calibrating in the full panel: just stop
+        home = self.cfg.get("home")
+        self.set_where(home if home in self.cfg["stations"] else "")
+        self._set(phase="idle", message=f"zatrzymany. Postaw łazik na starcie: {self._name(home)}")
+        return None
 
     def _trip(self, key):
         self._reload()
@@ -617,7 +630,7 @@ img{width:100%;border-radius:8px;display:block;background:#000}#err{color:var(--
 ul{margin:6px 0 0;padding-left:18px}li{margin:4px 0}
 </style>
 <main>
-<div class=card><h1>Robot na śmieci</h1><div id=msg>…</div>
+<div class=card><h1>Robot na śmieci <a href="/demo" style="font-size:14px;font-weight:400;color:var(--mute)">widok do prezentacji →</a></h1><div id=msg>…</div>
 <div class=mute>Akumulator: <span id=bat>?</span> <span id=obs></span></div>
 <div class=mute>Silniki: <span id=mot>?</span></div>
 <div class=mute>Widzę: <span id=seen>—</span></div></div>
@@ -730,6 +743,64 @@ refresh();setInterval(refresh,700);
 </script>"""
 
 
+DEMO = """<!doctype html><html lang=pl><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
+<title>Sloppy</title>
+<style>
+:root{--bg:#0f1115;--card:#1a1d23;--ink:#f2f4f7;--mute:#98a1ad;--go:#1f7a4d;--here:#2f5d8a;--stop:#c62828;--line:#2a2f37}
+@media (prefers-color-scheme:light){:root{--bg:#f4f5f7;--card:#fff;--ink:#16181c;--mute:#5f6773;--line:#dde1e6}}
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:18px/1.35 system-ui,sans-serif;display:flex}
+main{margin:auto;width:100%;max-width:980px;padding:16px;display:grid;gap:16px}
+#msg{font-size:clamp(22px,4vw,34px);font-weight:700;text-align:center;min-height:1.4em}
+#sub{color:var(--mute);text-align:center;font-size:16px;min-height:1.3em}
+#err{color:var(--stop);text-align:center;font-weight:600;min-height:1.3em}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+button:not(.here):not(.going):disabled{background:#3a3f47}
+button{font:700 clamp(20px,3vw,26px) system-ui;color:#fff;border:0;border-radius:18px;cursor:pointer;
+ padding:clamp(22px,5vw,40px) 14px;background:var(--go);box-shadow:0 2px 0 rgba(0,0,0,.25)}
+button small{display:block;font-weight:500;font-size:15px;opacity:.85;margin-top:6px}
+button:disabled{opacity:.35;cursor:default}
+button.here{background:var(--go);outline:4px solid var(--ink);opacity:1}
+button.going{outline:4px solid var(--ink);animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{50%{filter:brightness(1.25)}}
+#stop{background:var(--stop);font-size:clamp(26px,4vw,34px);padding:clamp(20px,4vw,30px)}
+footer{display:flex;justify-content:space-between;color:var(--mute);font-size:14px}
+footer a{color:var(--mute)}
+</style>
+<main>
+<div id=msg>…</div><div id=sub></div>
+<div class=grid id=buttons></div>
+<button id=stop onclick="post('/stop?home=1')">STOP<small>i od początku</small></button>
+<div id=err></div>
+<footer><span id=bat></span><a href="/">pełny panel</a></footer>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+async function post(u){const r=await fetch(u,{method:'POST'});$('err').textContent=r.ok?'':await r.text();refresh()}
+// one button per leg, in order; only the leg that starts where the car stands (and has a taught route) is live
+let built=false,legFrom={};
+async function refresh(){try{const s=await(await fetch('/status')).json();
+ const nm=k=>{const x=s.stations.find(st=>st.key==k);return x?x.name:k};
+ if(!built){built=true;s.legs.forEach(([a,b],i)=>{const x=document.createElement('button');x.id='leg'+i;legFrom[i]=a;
+  x.onclick=()=>post('/go?to='+b);$('buttons').append(x)})}
+ const driving=s.phase=='driving',taught=new Set(s.routes.map(r=>r.key));
+ let next=-1;
+ s.legs.forEach(([a,b],i)=>{const x=$('leg'+i),going=driving&&s.target==b&&s.message.includes(nm(b)),
+  mine=s.where==a,ok=mine&&(taught.has(a+'>'+b)||s.use_tags);
+  if(ok&&!driving)next=i;
+  x.innerHTML=(i+1)+'. '+nm(a)+' → '+nm(b)+'<small>'+(going?'jadę…':ok?'kliknij, żeby pojechać':
+   mine?'brak nauczonej trasy':!taught.has(a+'>'+b)&&!s.use_tags?'brak nauczonej trasy':'łazik musi stać: '+nm(a))+'</small>';
+  x.disabled=driving||!ok||s.phase=='teach'||s.calib||!s.motors;x.className=going?'going':ok&&!driving?'here':''});
+ $('msg').textContent=driving?s.message:s.where?'Łazik stoi: '+nm(s.where):s.message;
+ $('sub').textContent=!s.motors?'Silniki: brak połączenia (CANdle), łączę ponownie…':s.phase=='teach'?'Trwa nauka trasy w pełnym panelu':
+  driving?'':s.phase=='error'||s.phase=='stopped'?s.message:next>=0?'Następny etap: '+(next+1):
+  'Łazik nie stoi na początku żadnego etapu: ustaw w pełnym panelu, gdzie stoi';
+ $('bat').textContent='Akumulator: '+(s.volts==null?'?':s.volts+' V'+(s.battery=='low'?' (niski!)':''));
+}catch(e){$('msg').textContent='Brak połączenia z łazikiem'}}
+refresh();setInterval(refresh,600);
+</script>"""
+
+
 def serve(car, port):
     seen = deque(maxlen=30)
 
@@ -763,14 +834,14 @@ def serve(car, port):
                         time.sleep(0.1)  # ~10 fps is plenty for a view, and leaves the CPU to the driving loop
                 except (BrokenPipeError, ConnectionResetError):
                     return
-            return self._send(200, PAGE, "text/html; charset=utf-8")
+            return self._send(200, DEMO if path.rstrip("/") == "/demo" else PAGE, "text/html; charset=utf-8")
 
         def do_POST(self):
             u = urlsplit(self.path)
             q = {k: v[0] for k, v in parse_qs(u.query, keep_blank_values=True).items()}
             actions = {
                 "/go": lambda: car.go(q.get("to", "")),
-                "/stop": lambda: car.stop(),
+                "/stop": lambda: car.stop_home() if q.get("home") == "1" else car.stop(),
                 "/drive": lambda: car.manual(q.get("dir", "")),
                 "/turn": lambda: car.turn(q.get("dir", "")),
                 "/calib/start": car.calib_start,
