@@ -5,6 +5,7 @@ slow small steps, reach and height limits, load display, STOP on overload. It ne
 """
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -30,6 +31,7 @@ JOINTS = {1: ("b", "base"), 2: ("s", "shoulder"), 3: ("e", "elbow"), 4: ("t", "w
 DIRECTIONS.update({f"j{n}{z}": ("joint", n if z == "+" else -n) for n in JOINTS for z in "+-"})
 JOINT_RAD_S = {"slow": 0.15, "normal": 0.3, "fast": 0.5}  # rad/s
 COMMANDS = ("stop", "open", "close", "toggle", "lift")
+POSE_NAME = re.compile(r"^[A-Za-z0-9_-]{1,32}$")  # saved pose names: letters, digits, _ and -
 
 
 def _config():
@@ -241,6 +243,10 @@ class RoArmPanel:
                     elif c in ("open", "close", "toggle"):  # toggle = SPACE: grab / release (like the SO-101)
                         close = c == "close" or (c == "toggle" and self.g < (self.opened + self.closed) / 2)
                         self._gripper(close)
+                    elif isinstance(c, tuple) and c[0] == "save_pose":
+                        self._save_pose(c[1])
+                    elif isinstance(c, tuple) and c[0] == "goto_pose":
+                        self._goto_pose(c[1])
                     elif c == "lift" and not self.no_torque:  # P: grab and lift by 10 cm
                         self._gripper(True)
                         time.sleep(0.8)  # the fingers close (no sensor on the gripper)
@@ -265,8 +271,41 @@ class RoArmPanel:
                 self.target = None
                 time.sleep(1.0)
 
+    # ------------------------------------------------------------------ saved poses (joint angles)
+    def _save_pose(self, name):
+        """Current joint angles (+ x y z for reference) -> roarm_calibration.json "poses"[name]."""
+        import roarm_pick
+
+        d = self._where()
+        cfg = roarm_pick.load_config()
+        cfg.setdefault("poses", {})[name] = {k: round(d[k], 4) for k in ("b", "s", "e", "t", "r", "g", "x", "y", "z", "tit")}
+        roarm_pick.save_config(cfg)
+        self.state["message"] = f"pose '{name}' saved"
+
+    def _goto_pose(self, name):
+        """To a saved pose by joint angles (T:102) - every joint straight to its angle, slowly; no x y z maths."""
+        pose = (_config().get("poses") or {}).get(name)
+        if not pose:
+            self.state["message"] = f"no pose '{name}'"
+            return
+        if self.no_torque:
+            self._torque_here(self._where())  # motors on where the arm is first, then move
+        w = JOINT_RAD_S[self.speed]
+        self._js({"T": 102, "base": pose["b"], "shoulder": pose["s"], "elbow": pose["e"], "wrist": pose["t"],
+                  "roll": pose["r"], "hand": pose["g"], "spd": int(w * 4096 / 6.283), "acc": 10})
+        self.target, self.g = None, pose["g"]  # re-read the position after the move (the panel starts from there)
+        self.dir = None
+        self.state["message"] = f"going to pose '{name}'"
+
+    def delete_pose(self, name):
+        import roarm_pick
+
+        cfg = roarm_pick.load_config()
+        (cfg.get("poses") or {}).pop(name, None)
+        roarm_pick.save_config(cfg)
+
     def data(self):
-        return dict(self.state, speed=self.speed)
+        return dict(self.state, speed=self.speed, poses=_config().get("poses") or {})
 
 
 _panel = None
@@ -293,6 +332,13 @@ def handle(h, path, q):
         return h._json({"ok": True})
     if path == "/roarm/speed" and q.get("v") in SPEEDS:
         p.speed = q["v"]
+        return h._json({"ok": True})
+    if path in ("/roarm/save_pose", "/roarm/goto_pose") and POSE_NAME.match(q.get("name", "")):
+        with p._lock:
+            p.commands.append((path[7:], q["name"]))
+        return h._json({"ok": True})
+    if path == "/roarm/delete_pose" and POSE_NAME.match(q.get("name", "")):
+        p.delete_pose(q["name"])
         return h._json({"ok": True})
     if path == "/roarm/command" and q.get("c") in COMMANDS:
         with p._lock:
@@ -354,6 +400,10 @@ details{margin-top:8px;font-size:13px;color:var(--dim)}#servos{display:grid;grid
 <button data-k="r+">roll gripper<small>U</small></button><button data-k="r-">roll gripper<small>O</small></button><span></span></div>
 <h2>Gripper</h2><div class="grid">
 <button data-c="toggle">GRAB / RELEASE<small>SPACE</small></button><button data-c="lift" class="green">GRAB AND LIFT<small>P - 10 cm up</small></button><button data-c="open">open<small>Z</small></button></div>
+<h2>Saved poses (joint angles)</h2><div class="grid" style="grid-template-columns:2fr 1fr">
+<input id="posename" placeholder="name, e.g. above_neck" style="font:inherit;padding:10px;border-radius:8px;border:1px solid var(--line);background:#0b0f14;color:var(--text)">
+<button id="savepose" class="green">Save pose</button></div>
+<div id="poses" style="margin-top:6px;font-size:13px;font-variant-numeric:tabular-nums"></div>
 <h2>Speed</h2><div class="grid"><button data-v="slow">1 slow<small>aiming</small></button><button data-v="normal" class="on">2 normal</button><button data-v="fast">3 fast</button></div>
 </div></main><script>
 const $=id=>document.getElementById(id),get=u=>fetch(u).then(r=>r.json()).catch(()=>({}));
@@ -409,7 +459,16 @@ async function refreshSystem(){const s=await get('/system'),w=[];
  const all=[];if(s.so101&&s.so101.temp)for(const[k,v]of Object.entries(s.so101.temp))all.push(`<span>SO-101 ${k}: ${v} C${s.so101.voltage&&s.so101.voltage[k]?' / '+s.so101.voltage[k].toFixed(1)+' V':''}</span>`);
  if(roarm.servo_temps)for(const[k,v]of Object.entries(roarm.servo_temps))all.push(`<span>RoArm ${k}: ${v} C</span>`);
  $('servos').innerHTML=all.join('')||'no data';setTimeout(refreshSystem,1000)}refreshSystem();
-async function refresh(){const d=await get('/roarm/state');if(d.x!==undefined){$('px').textContent=Math.round(Math.hypot(d.x,d.y))+' mm';$('py').textContent=Math.round(Math.atan2(d.y,d.x)*180/Math.PI)+' deg';$('pz').textContent=Math.round(d.z)+' mm'}
+$('savepose').onclick=()=>{const n=$('posename').value.trim();if(!/^[A-Za-z0-9_-]{1,32}$/.test(n)){alert('Name: letters, digits, _ or - (max 32)');return}
+ get('/roarm/save_pose?name='+n)};
+let posesShown='';
+function showPoses(p){const key=JSON.stringify(p||{});if(key===posesShown)return;posesShown=key;
+ $('poses').innerHTML=Object.entries(p||{}).map(([n,v])=>`<div style="display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:center;margin:4px 0">
+ <span><b>${n}</b><br><small style="color:var(--dim)">b ${v.b.toFixed(2)} s ${v.s.toFixed(2)} e ${v.e.toFixed(2)} t ${v.t.toFixed(2)} r ${v.r.toFixed(2)} g ${v.g.toFixed(2)}</small></span>
+ <button data-go="${n}">go</button><button data-del="${n}">delete</button></div>`).join('')||'<small style="color:var(--dim)">none yet</small>';
+ document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>{if(confirm('Move the RoArm to pose '+b.dataset.go+'?'))get('/roarm/goto_pose?name='+b.dataset.go)});
+ document.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{if(confirm('Delete pose '+b.dataset.del+'?'))get('/roarm/delete_pose?name='+b.dataset.del)})}
+async function refresh(){const d=await get('/roarm/state');showPoses(d.poses);if(d.x!==undefined){$('px').textContent=Math.round(Math.hypot(d.x,d.y))+' mm';$('py').textContent=Math.round(Math.atan2(d.y,d.x)*180/Math.PI)+' deg';$('pz').textContent=Math.round(d.z)+' mm'}
  roarm=d;bar($('lshoulder'),d.shoulder_load);bar($('lelbow'),d.elbow_load);
  $('t-shoulder').textContent=d.shoulder_load!=null?Math.abs(d.shoulder_load):'-';$('t-elbow').textContent=d.elbow_load!=null?Math.abs(d.elbow_load):'-';
  $('msg').textContent=d.message||'';$('msg').className=(!d.connected||/OVERLOAD/.test(d.message||''))?'bad':'';
