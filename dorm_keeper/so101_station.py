@@ -2840,6 +2840,50 @@ def read_sliders(tracking):
     return tracking
 
 
+BOOT_ID_FILE = "last_boot_id"   # startup poses run once per Pi boot, not after every service restart
+
+
+def first_start_since_boot(boot_id_path="/proc/sys/kernel/random/boot_id", seen_path=BOOT_ID_FILE):
+    """True the first time this is called after a (Linux) boot; False on a laptop or after a service restart."""
+    try:
+        with open(boot_id_path) as f:
+            boot = f.read().strip()
+    except OSError:
+        return False
+    if os.path.exists(seen_path) and open(seen_path).read().strip() == boot:
+        return False
+    with open(seen_path, "w") as f:
+        f.write(boot)
+    return True
+
+
+def startup_poses(wait_s=300.0):
+    """After boot: RoArm to its "rest" pose, then the SO-101 to the M pose ("look"). RoArm first: it clears the
+    table before the camera arm swings in. Waits up to wait_s for the RoArm (the roarm-usb bridge starts in parallel,
+    the arm may be powered later)."""
+    import roarm_pick
+
+    cfg = roarm_pick.load_config()
+    arm = roarm_pick.RoArm(cfg["roarm_ip"])
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            arm.where()
+            break
+        except RuntimeError as e:
+            if time.monotonic() > deadline:
+                print(f"startup: RoArm not answering ({e}) - it stays where it is")
+                break
+            time.sleep(3)
+    try:
+        roarm_pick.go_rest(arm, cfg)
+        print("startup: RoArm at rest")
+    except (RuntimeError, TimeoutError, roarm_pick.Overheat) as e:
+        print(f"startup: RoArm did not go to rest: {e}")
+    _web_keys.put("h")  # SO-101 to the M pose through the main loop (same as the H key)
+    print("startup: SO-101 to the M pose")
+
+
 def camera_mode(port=None, mock=False):
     """Main program: camera window + manual control + can inspection on a signal."""
     import cv2
@@ -2858,6 +2902,8 @@ def camera_mode(port=None, mock=False):
     tracking = TRACK and "--no-tracking" not in sys.argv  # --no-tracking: the arm moves only from keys
     loop_t = time.time()
     srv = http_server(arm)
+    if first_start_since_boot():
+        threading.Thread(target=startup_poses, daemon=True).start()
     print(f"Pad: {'CONNECTED' if st.pad_ok else 'none (keyboard only)'}")
     print(f"READY. Signal from the RoArm: http://{my_ip()}:{HTTP_PORT}/scan")
     title = "SO-101 Arm"
