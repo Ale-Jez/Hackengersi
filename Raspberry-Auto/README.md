@@ -13,7 +13,7 @@ Two MAB **MA-D-GL40 KV70** direct-drive actuators (one per wheel, each with its 
 
 ## Station panel (`app.py`)
 
-Stations are in `config.json` `stations` (dok = tag 0, biurko = tag 1, sortownia = tags 2, 3, 4). A trip from a station to another replays the route taught for that pair (`routes.json`): every move drives until the wheel encoders turned as far as when taught. With `use_tags` on, the car then docks `stop_cm` in front of the station tag if that tag was in view when the route was saved; with it off (now), routes alone drive the car.
+Stations are in `config.json` `stations` (dok = tag 0, biurko = tag 1, sortownia = tags 2, 3, 4). A trip from a station to another replays the route taught for that pair (`routes.json`, the Pi copy is the live one; a snapshot is kept in git): every move drives until the wheel encoders turned as far as when taught. With `use_tags` on, the car then docks `stop_cm` in front of the station tag if that tag was in view when the route was saved; with it off (now), routes alone drive the car.
 
 Teaching: stand the car at the start station, "Ucz trasy", drive with the arrows and the 90° buttons to the target, "Zapisz trasę". Moves made after saving (e.g. turning round to park) are offered to be appended to that route. A 90° turn is `π/2 × (track_m / 2) / wheel_radius_m` of wheel rotation, unless "Kalibruj obrót" measured it (`calib.json`).
 

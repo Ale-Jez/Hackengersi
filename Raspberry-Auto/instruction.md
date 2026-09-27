@@ -24,7 +24,8 @@ A two-wheel car (Raspberry Pi 5, two MAB GL40 wheel drives on a CANdle USB dongl
 - SSH uses key auth from the dev laptop (`ssh hackengersi@192.168.32.144`). **Never write passwords (Pi login or WiFi) into any file in this repo.** Ask the user for them.
 - Not the same machine as `malina` (192.168.32.114), the other Pi that runs the arm / SO-101 station. Don't deploy there.
 - Code lives in `~/Raspberry-Auto` with a venv in `~/Raspberry-Auto/.venv` (system site packages: apt OpenCV + picamera2; `candlesdk`/`pyCandle` built from `~/CANdle-SDK`). Always run with `.venv/bin/python`.
-- Pi-only files that are not in git and must not be overwritten or deleted: `.venv/`, `floor.npy` (learned floor colour), `routes.json` (taught routes), `where.json` (station the car stands at), `calib.json` (measured 90° turn), `*.jpg`, `*.log`.
+- Pi-only files that are not in git and must not be overwritten or deleted: `.venv/`, `floor.npy` (learned floor colour), `where.json` (station the car stands at), `calib.json` (measured 90° turn), `*.jpg`, `*.log`.
+- `routes.json` (the taught routes) is in git as a snapshot, but the Pi copy is the live one: after re-teaching, copy it from the Pi into git (`scp hackengersi@<pi>:~/Raspberry-Auto/routes.json .`). The deploy command above does not copy it; never push an older one onto the Pi.
 - Only one process can open the camera (and the CANdle). Stop `app.py` / `stream.py` before running `drive.py` / `course.py` / `motors.py`, and check the panel is not driving or teaching (`/status`) before restarting it.
 - Shut down with `sudo poweroff` before cutting power (a hard cut once corrupted an SD card).
 
