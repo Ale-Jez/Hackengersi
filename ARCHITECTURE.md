@@ -1,4 +1,4 @@
-# Architecture
+# Bin There, Sort That — Architecture
 
 ## System Overview
 

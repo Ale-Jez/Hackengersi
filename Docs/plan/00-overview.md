@@ -48,14 +48,16 @@ It lives in `Raspberry/`. The work is mostly teaching poses, calibrating and tun
 | 06 | [06-pick-and-sort.md](06-pick-and-sort.md) | `python main.py sort` empties a bin of mixed trash | 04, 05 |
 | 07 | [07-demo.md](07-demo.md) | a demo run you can repeat, a reset procedure, and a list of fallbacks | 06 |
 
-## Parallel tracks (team of 4)
+## Original parallel tracks (Alien Bazaar hackathon — team of 4)
+
+This build plan was executed in parallel tracks during the hackathon:
 
 - **A: Pi and vision.** Steps 01 and 04, then prompt tuning in 06.
 - **B: RoArm.** Step 02, then pick tuning in 06.
 - **C: SO-101 and calibration.** Step 03, then 05 together with B.
 - **D: mechanics and demo.** Mount the bin and containers, print the tags, then 07.
 
-Steps 05 and 06 need everyone's hardware in one place. Fix the layout (step 02, "Fix the layout") early: moving anything afterwards means redoing step 05.
+Steps 05 and 06 required everyone's hardware in one place. The layout (step 02, "Fix the layout") was fixed early, as moving anything afterwards would require redoing step 05.
 
 ## Hard rules (these have already cost us hardware)
 

@@ -1,4 +1,4 @@
-# Contributing to Alien Bazaar
+# Contributing to Bin There, Sort That
 
 ## 🛠️ Development Setup
 
@@ -38,10 +38,11 @@ Before working with the robot:
 
 ## 🔀 Git Workflow
 
-1. Work on your track's files (see README for parallel tracks A–D)
+1. Create a feature branch for your work
 2. Test with `selftest` before committing
-3. Commit with clear messages: `[track] what changed`
-4. Pull before pushing — coordinate in the team chat
+3. Commit with clear messages: `[area] what changed` (e.g., `[vision]`, `[arm]`, `[nav]`)
+4. Pull before pushing — ensure CI passes
+5. Open a PR with description of changes and testing done
 
 ## 📂 Where Things Go
 
