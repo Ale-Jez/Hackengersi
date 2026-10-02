@@ -410,7 +410,7 @@ def with_menu(page, path):
     favicon = ('<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 '
                f'viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>{icon}</text></svg>">')
     extra = "<style>body{grid-template-rows:auto auto 1fr}#menu{margin:-18px -22px 0}</style>" if path == "/demo" else ""
-    menu = '<nav id="menu"><b>Hackengersi</b>' + "".join(
+    menu = '<nav id="menu"><b>Bin There, Sort That</b>' + "".join(
         f'<a href="{p}"{" class=on" if p == path else ""}>{i} {label}</a>' for p, label, _, i in PAGES) + "</nav>"
     html = page.decode("utf-8")
     html = re.sub(r"<title>.*?</title>", f"<title>{title}</title>", html, count=1, flags=re.S)
