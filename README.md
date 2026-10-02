@@ -1,10 +1,7 @@
 <p align="center">
-  <h1 align="center">Alien Bazaar — Autonomous Trash Sorting Robot</h1>
+  <h1 align="center">Bin There, Sort That — Autonomous Trash Sorting Robot</h1>
   <p align="center">
     <em>A self-driving trash can that navigates indoor spaces, identifies waste with AI vision, and sorts recyclables with robotic arms.</em>
-  </p>
-  <p align="center">
-    <strong>Team Hackengersi</strong> · Hackathon 2026
   </p>
 </p>
 
@@ -323,16 +320,14 @@ python roarm_usb.py --test    # USB-serial bridge HTTP layer (no arm needed)
 
 ---
 
-## Team
+## Development
 
-**Hackengersi** — a team of 4 working in parallel tracks:
+This project evolved from a hackathon prototype (Alien Bazaar, Hackengersi team) into a full autonomous sorting system. Active development areas include:
 
-| Track | Focus |
-|-------|-------|
-| **A** | Pi setup, vision pipeline, prompt tuning |
-| **B** | RoArm bring-up, pick tuning |
-| **C** | SO-101, camera calibration |
-| **D** | Mechanics, demo setup, CubeBot driving |
+- **Vision & AI**: Qwen2.5-VL-7B analysis, YOLO detection, barcode reading
+- **Arm control**: RoArm-M3 picking optimization, SO-101 positioning & tracking
+- **Navigation**: AprilTag-based route following, obstacle detection, steering tuning
+- **Integration**: Multi-arm coordination, deposit system API, web UI for calibration & control
 
 ---
 
@@ -343,5 +338,5 @@ Hackathon project — see individual component licenses for hardware SDKs.
 ---
 
 <p align="center">
-  <em>Built with very little sleep at Alien Bazaar Hackathon, Warsaw 2026</em>
+  <em>Bin There, Sort That — Autonomous Sorting in Action</em>
 </p>
